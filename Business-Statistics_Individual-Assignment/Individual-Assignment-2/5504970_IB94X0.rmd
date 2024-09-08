@@ -1,0 +1,586 @@
+---
+title: 'Business Statistics End of Term Assessment IB94X0 2023-2024 #1'
+author: '5504970'
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+---
+
+```{r setup, message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(emmeans)
+library(gridExtra)
+library(Hmisc)
+library(car)
+library(ggpubr)
+options(width=100)
+```
+
+---
+
+# Academic Integrity Declaration
+
+We’re part of an academic community at Warwick. Whether studying, teaching, or researching, we are all taking part in an expert conversation which must meet standards of academic integrity. When we all meet these standards, we can take pride in our own academic achievements, as individuals and as an academic community.
+
+Academic integrity means committing to honesty in academic work, giving credit where we’ve used others’ ideas and being proud of our own achievements.
+
+In submitting my work, I confirm that:
+
+1. I have read the guidance on academic integrity provided in the Student Handbook and understand the University regulations in relation to Academic Integrity. I am aware of the potential consequences of Academic Misconduct.
+2. I declare that the work is all my own, except where I have stated otherwise. 
+3. No substantial part(s) of the work submitted here has also been submitted by me in other credit bearing assessments courses of study (other than in certain cases of a re-submission of a piece of work), and I acknowledge that if this has been done this may lead to an appropriate sanction. 
+4. Where a generative Artificial Intelligence such as ChatGPT has been used I confirm I have abided by both the University guidance and specific requirements as set out in the Student Handbook and the Assessment brief. I have clearly acknowledged the use of any generative Artificial Intelligence in my submission, my reasoning for using it and which generative AI (or AIs) I have used. Except where indicated the work is otherwise entirely my own. 
+5. I understand that should this piece of work raise concerns requiring investigation in relation to any of points above, it is possible that other work I have submitted for assessment will be checked, even if marks (provisional or confirmed) have been published. 
+6. Where a proof-reader, paid or unpaid was used, I confirm that the proof-reader was made aware of and has complied with the University’s proofreading policy.
+
+---
+
+# Question 1
+
+### Data Dictionary
+
+Variable            | Description
+--------------      | -----------------------------------------------------
+date                | Date when the bikes were hired
+Hires               | Number of bikes hired on the particular date
+wfh                 | The policy to work from home - 1 indicates the policy was implemented and 0 indicates the policy was not implemented
+rule_of_6_indoors   | The policy to restrict social gatherings to a limit of six individuals in any venue, indoors or outdoors - 1 indicates the policy was implemented, 0 indicates the policy was not implemented
+eat_out_to_help_out | The scheme involved the government subsidising food and non-alcoholic drinks at participating cafes, pubs, and restaurants at 50%, up to £10 per person (per order) - 1 indicates the policy was implemented, 0 indicates the policy was not implemented
+day                 | Day of the bike hires
+month               | Month of the bike hires
+year                | Year of the bike hires
+
+This is the list of variables for the data of London bike hires.
+
+### Data Preparation
+```{r message=FALSE, warning=FALSE}
+# Read the data
+london.covid.bikes <- read_csv('London_COVID_bikes.csv')
+```
+We read the dataset of bike hires in London.
+
+```{r}
+# Use summary to check if there is anomaly in the data and see the distribution of values 
+summary(london.covid.bikes)
+str(london.covid.bikes)
+```
+We check the type of data using summary and str function.
+
+```{r}
+# Set the correct measurement level of data types
+col <- c('wfh', 'rule_of_6_indoors', 'eat_out_to_help_out', 'day', 'month', 'year')
+london.covid.bikes[col] <- lapply(london.covid.bikes[col], as.factor)
+```
+We convert the data type of variables 'wfh', 'rule_of_6_indoors', 'eat_out_to_help_out', 'day', 'month', and 'year' to factor, so that they can be used for later analysis and plotting.
+
+```{r}
+# Check if there is any missing value
+colSums(is.na(london.covid.bikes))
+
+# Find duplicated values in the selected column
+column_to_check <- "date"
+
+duplicated_values <- london.covid.bikes[london.covid.bikes$date %in% london.covid.bikes[duplicated(london.covid.bikes$date) | duplicated(london.covid.bikes$date, fromLast = TRUE), ]$date, column_to_check]
+
+print(duplicated_values)
+
+# Find rows with duplicated values
+column_to_check <- "date"
+value_to_find <- "2021-12-13"
+
+specific_row <- london.covid.bikes[london.covid.bikes[, column_to_check] == value_to_find, ]
+
+print(specific_row)
+
+# Remove one of the duplicated rows
+value.to.remove.in.date <- "2021-12-13"
+value.to.remove.in.wfh <- 0
+
+# Remove the specific row based on values in two different columns
+london.covid.bikes <- london.covid.bikes[!(london.covid.bikes$date == value.to.remove.in.date & london.covid.bikes$wfh == value.to.remove.in.wfh), ]
+```
+
+After doing some checking on the data, it is found that there is no missing value in the dataset but there are duplicated rows with the same date (2021-12-13). We remove one of the row where wfh = 0 since by seeing the pattern of the, it seems to be a minor data entry error and wfh should be 1.
+
+```{r}
+# Using histogram to check if the distribution of the data is normal or not
+ggplot(london.covid.bikes) + geom_histogram(aes(Hires), binwidth=200) + labs(title='Plot 1.1 Distribution of Bike Hires 2010-2023', x='Number of Bike Hires', y='Occurence (Count)')
+```
+</h1>Plot 1.1 tells us that the number of bike hires is roughly normally distributed, with a a few outliers occurs. We may remove some of the outliers to make the data more normally distributed for the purpose of better analysis result. 
+
+```{r}
+# Remove outliers from the data
+london.covid.bikes <- london.covid.bikes[london.covid.bikes$Hires <= 60000, ]
+```
+We remove data of number of bike hires with value > 60000.
+
+### Data Analysis Using Time Series Plot
+```{r}
+# Plot the number of bike hires as time series
+ggplot(london.covid.bikes, aes(x=date, y=Hires)) + geom_line() + scale_x_date(date_breaks = "1 years", date_labels="%Y") + labs(title='Plot 1.2 Number of Bike Hires 2010-2023', x='Year', y='Number of Bike Hires')
+```
+
+</h1>As per Plot 1.2, the number of bike hires has some certain patterns. In 2010 - 2015 the number of bike hires seems to have upward trend but in 2015-2019 the trend seems to be flat or constant. Upward trend is seen again in 2020-2022 but there is a drastic drop of number of bike hires in 2023.
+
+
+```{r}
+# Plot the Work From Home (wfh) scheme as time series
+ggplot(london.covid.bikes, aes(x=date, y=Hires)) + geom_line(aes(color=wfh)) + scale_x_date(date_breaks = "1 years", date_labels = "%Y") + labs(title=' Plot 1.3 Work From Home Scheme 2010-2023', x='Year', y='Number of Bike Hires')
+```
+</h1>In Plot 1.3, we can see that the Work From Home (wfh) scheme started to apply in 2020 onwards (blue colour), which is around March 2020 as a respond to the COVID-19 pandemic.
+
+```{r}
+# Plot the Rule of 6 Indoors scheme as time series
+ggplot(london.covid.bikes, aes(x=date, y=Hires)) + geom_line(aes(color=rule_of_6_indoors)) + scale_x_date(date_breaks = "1 years", date_labels = "%Y") + labs(title='Plot 1.4 Rule of 6 Indoors Scheme 2010-2023', x='Year', y='Number of Bike Hires')
+```
+</h1>Rule of 6 Indoor was also applied when COVID-19 pandemic occurred. It seem 
+Rule of 6 Indoors scheme only happened in 2020 - 2021 as shown in Plot 1.4 (blue colour).
+
+```{r}
+# Plot the Eat Out to Help Out scheme as time series
+ggplot(london.covid.bikes, aes(x=date, y=Hires)) + geom_line(aes(color=eat_out_to_help_out)) + scale_x_date(date_breaks = "1 years", date_labels = "%Y") + labs(title='Plot 1.5 Eat Out to Help Out Scheme', x='Year', y='Number of Bike Hires')
+```
+</h1>Eat Out to Help Out scheme was applied in the shortest period of time among the other 2 schemes. From Plot 1.5, we can see that Eat Out to Help Out scheme was only implemented in 2020 (blue colour).
+
+### Correlation and Regression Model without Time Variables
+```{r}
+# Use Pearson correlation matrix to show the correlation between each pair of variables (correlation coefficient and p-value)
+rcorr(as.matrix(select(london.covid.bikes, Hires, wfh, rule_of_6_indoors, eat_out_to_help_out)))
+```
+Since the data of bike hires is normally distributed, we use Pearson correlation matrix to check the correlation between wfh, rule_of_6_indoors and eat_out_to_help_out is significant under NHST, which means the r-value is not zero. It is shown that wfh, rule_of_6_indoors and eat_out_to_help_out have a quite low r value, where wfh vs. rule_of_6_indoors has r-value = 0.24 (5.76% shared variance), wfh vs. eat_out_to_help_out has r-value = -0.04 (0.16% shared variance), and rule_of_6_indoors vs. eat_out_to_help_out has r-value = -0.01 (0.01 shared variance). This information suggests that we shouldn't have any problems with multicollinearity if we use those 3 schemes as predictors in a multiple regression.
+
+```{r}
+# Simple linear regression for number of bike hires as a function of Work From Home (wfh) scheme
+m.hires.by.wfh <- lm(Hires~wfh, data=london.covid.bikes)
+summary(m.hires.by.wfh)
+cbind(coef(m.hires.by.wfh), confint(m.hires.by.wfh))
+```
+The simple linear regression model between number of bike hires and wfh scheme shows us that for every 1 day of wfh is applied, 1546 more units of bike are rented (t(4800) = 4.71, p<0.001, CI [902.74, 2191.11]).
+
+```{r}
+# Simple linear regression regression for bike hires as a function of Rule of 6 Indoors scheme
+m.hires.by.rule_of_6_indoors <- lm(Hires~rule_of_6_indoors, data=london.covid.bikes)
+summary(m.hires.by.rule_of_6_indoors)
+cbind(coef(m.hires.by.rule_of_6_indoors), confint(m.hires.by.rule_of_6_indoors))
+```
+The simple linear regression model between number of bike hire and Rule of 6 Indoors scheme shows us that for every 1 day of Rule of 6 Indoors is applied, 9386 more units of bike are rented (t(4800) = 9.62, p<0.001, CI [7474.05, 11298.10]).
+
+```{r}
+# Simple linear regression regression for bike hires as a function of Eat Out to Help Out scheme
+m.hires.by.eat_out_to_help_out <- lm(Hires~eat_out_to_help_out, data=london.covid.bikes)
+summary(m.hires.by.eat_out_to_help_out)
+cbind(coef(m.hires.by.eat_out_to_help_out), confint(m.hires.by.eat_out_to_help_out))
+```
+The simple linear regression model between number of bike hires and Eat Out to Help Out scheme shows us that for every 1 day of Eat Out to Help Out scheme is applied, 9943 more units of bike are rented (t(4800) = 5.51, p<0.001, CI [6405.91, 13481.22]).
+
+```{r}
+# Multiple linear regression without interaction for bike hires as function of Work From Home, Rule of 6 Indoors, and the Eat Out to Help Out scheme
+m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out <- lm(Hires~wfh + rule_of_6_indoors + eat_out_to_help_out, data=london.covid.bikes)
+summary(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out)
+cbind(coef(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out), confint(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out))
+```
+We include the 3 schemes into 1 regression model to see the impact on number of bike hires. Based on the result, we find that the combined effects remain significant, where wfh has positive effect on bike hires with coefficient = 932 (t(4798) = 2.79, p = 0.005, 95% CI [276.05, -1588.04]), rule_of_6_indoors has positive effect on bike hires with coefficient = 8791 (t(4798) = 8.79, p<0.001, 95% CI [6831.35, 10750.71]), and eat_out_to_help_out has positive effect on bike hires with = 10332.6 (t(4798) = 5.78, p<0.001, 95% CI [6828.29, 113836.84]).
+
+```{r}
+# Multiple linear regression with interaction for bike hires as function of Work From Home, Rule of 6 Indoors, and the Eat Out to Help Out scheme
+m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.intr <- lm(Hires~wfh * rule_of_6_indoors * eat_out_to_help_out, data=london.covid.bikes)
+summary(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.intr)
+cbind(coef(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.intr), confint(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.intr))
+```
+When we try to build regression model with interation terms of the 3 schemes, the result shows that:</h1>
+1. When 'wfh' is applied, there is an estimated increase in bike hires of 1011 units (t(4797) = 3.009, p = 0.003, 95% CI [352.35, 1669.76]).</h1>
+2. When rule_of_6_indoors is applied, there is an estimated increase in bike hires of 16567 units (t(4797) = 4.97, p<0.001, 95% CI [10032.66, 23102.35]).</h1>
+3. When eat_out_to_help_out is applied, there is an estimated increase in bike hires of 10349 units (t(4797) = 5.79, p<0.001, 95% CI [6846.95, 13851.92]).</h1>
+4. When both 'wfh' and rule_of_6_indoors are applied together, there is an estimated decrease in bike hires of 8544 units (t(4797) = -2.45, p = 0.015, 95% CI [-15393.79, -1694.27]).</h1>
+The R-squared value is 0.028, indicating that the model explains only about 2.8% of the variability in bike hires. The adjusted R-squared is similar, suggesting that adding these predictor variables to the model did not significantly improve its explanatory power.</h1>
+Some coefficients for interaction terms have NA values, indicating that there might be issues with collinearity or singularities in the model due to Work From Home, Rule of 6 Indoors, and the Eat Out to Help Out scheme were not applied before COVID-19 happened (2010-2019).
+
+```{r}
+# Checking the multicollinearity for multiple linear regression with 3 predictors: Work From Home, Rule of 6 Indoors, and the Eat Out to Help Out scheme
+vif(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out)
+```
+The VIF score of avg.review and total.reviews do not cause multicollinearity and can be used as predictors in the same model.</h1>
+</h1>
+We do not check VIF score for regression model with interaction as VIF score will be very high but it is due to structural multicollinearity. The vif scores are low when interaction terms are excluded from the model.
+
+```{r}
+# Model comparison between multiple linear regression without interaction and with interaction (Work From Home, Rule of 6 Indoors, and the Eat Out to Help Out scheme as predictors)
+anova(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out, m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.intr)
+```
+The ANOVA test shows that the overall model fit is significantly improved (F(1,4797) = 5.98, p = 0.015). Therefore, when we increase the complexity of the model by including interaction terms, it provides a statistically significant improvement in explaining the variation of bike hires.
+
+```{r}
+# Emmeans for the regression model without time variables
+emm.model <- emmeans(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.intr, ~ wfh * rule_of_6_indoors * eat_out_to_help_out)
+summary(emm.model)
+emm.model.means.ci <- confint(emm.model)
+```
+We can interpret the emmeans result as follows.</h1>
+1. When Work From Home (wfh) is not applied (0), the estimated marginal mean is 26069 (95% CI [25765, 26373]) and when wfh is applied (1), the estimated marginal mean is 27080 (95% CI [26496, 27664]).</h1>
+2. When Rule of 6 Indoors is applied (1), the estimated marginal mean is 42637 (95% CI [36109, 49164]).</h1>
+3. When Eat Out to Help Out is applied (1), the estimated marginal mean is 36418 (95% CI [32929, 39908]).</h1>
+4. When both Work From Home and Rule of 6 Indoors are applied (1), the estimated marginal mean is 35104 (95% CI [33135, 37072]).</h1>
+
+### Data Analysis Using Violin Plot
+```{r message=FALSE, warning=FALSE}
+# Checking the distribution of bike hires for each day across 2010-2023
+ggplot(london.covid.bikes, aes(x=day, y=Hires, fill=Hires)) +
+  geom_violin(trim=FALSE, alpha = 0.5, aes(color=day)) +
+  stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), color="black", aes(shape="Mean with standard deviation")) +
+  labs(x="Day", y="Number of Bike Hires", title = "Plot 1.6 Distribution of Bike Hires for Each Day Across 2010-2023") +
+  guides(col="none") + 
+  theme(legend.position="bottom", legend.title=element_blank(), plot.title = element_text(size = 12))
+```
+</h1>Plot 1.6 shows us that Saturday and Sunday have the lowest number of bike hires. This could be an indication that people rent bike more on weekday to go to work and they stay at home during weekend. 
+
+
+```{r message=FALSE, warning=FALSE}
+# Checking the distribution of bike hires for each month across 2010-2023
+ggplot(london.covid.bikes, aes(x=month, y=Hires, fill=Hires)) +
+  geom_violin(trim=FALSE, alpha = 0.5, aes(color=month)) +
+  stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), color="black", aes(shape="Mean with standard deviation")) +
+  labs(x="Month", y="Number of Bike Hires", title = "Plot 1.7 Distribution of Bike Hires for Each Month Across 2010-2023") +
+  guides(col="none") + 
+  theme(legend.position="bottom", legend.title=element_blank(), plot.title = element_text(size = 12)) + 
+  scale_x_discrete(limits = month.abb)
+```
+</h1>Based on Plot 1.7, we can see that bike hires decreases at the end of the year and at the beginning of the year. Bike hires reaches its peak on month June-July (mid-year). It might be because end of year and beginning of year are winter season in the UK, so less number of people are using bike when they go outside.
+
+```{r message=FALSE, warning=FALSE}
+# Checking the distribution of bike hires for each year 2010-2023
+ggplot(london.covid.bikes, aes(x=year, y=Hires, fill=Hires)) +
+  geom_violin(trim=FALSE, alpha = 0.5, aes(color=year)) +
+  stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), color="black", aes(shape="Mean with standard deviation")) +
+  labs(x="Year", y="Number of Bike Hires", title = "Plot 1.8 Distribution of Bike Hires for Each Year 2010-2023") +
+  guides(col="none") + 
+  theme(legend.position="bottom", legend.title=element_blank(), plot.title = element_text(size = 12))
+```
+</h1>Plot 1.8 displays the distribution of bike rentals by year, which appears to be rising between 2010 and 2015. Between 2016 and 2019, the trend was flat; between 2020 and 2023, it began to decline.
+
+### Regression Model with Time Variables
+```{r}
+# Multiple linear regression for bike hires with 3 predictors: Work From Home, Rule of 6 Indoors, and the Eat Out to Help Out scheme by including interaction with time variables (day, month, and year)
+m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.time <- lm(Hires~wfh * rule_of_6_indoors * eat_out_to_help_out + day + month + year + wfh:day + wfh:month + wfh:year + rule_of_6_indoors:day + rule_of_6_indoors:month + rule_of_6_indoors:year + eat_out_to_help_out:day + eat_out_to_help_out:month + eat_out_to_help_out:year, data=london.covid.bikes)
+summary(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.time)
+cbind(coef(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.time), confint(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.time))
+```
+The model above helps us to understand more about the effect of 3 COVID-19 policies (Work From Home, Rule of 6 Indoors, and the Eat Out to Help Out scheme) to the number of bike hires by including the interaction with time variables to each scheme (day, month, year).</h1>
+1. Work From Home scheme (wfh) has negative coefficient of -8015.13 and significant effect (t(4733) = -7.46, p<0.001, 95% CI [-10120.62, -5909.64]). It means wfh contributes to the decrease of bike hires during COVID-19. However, if we check more detail, wfh has negative effect on bike hires during weekday and positive effect during weekend. The wfh effect is significant for weekend (p<0.001). This is an indication that since people are working from home, there are less number of people renting bikes to go to work and people will rent bikes more during weekend for recreation purpose.</h1>
+2. Rule of 6 Indoor scheme has positive coefficient of 4465.27 but it is not significant (t(4733) = 1.624, p = 0.1, 95% CI [-923.55, 9854.09]). If we look the interaction between Rule of 6 Indoor with time variables, they are all not significant as well, except for interaction with Saturday (coefficient = 8951.19, (t(4733) = 3.72, p<0.001, 95% CI [4233.43, 13668.95])). Since rule of 6 Indoor was implemented in the UK only for a short period of time (September 2020 and May 2021), it might have given very small effect or almost no effect to the bike hires.</h1>
+3. Eat Out to Help Out scheme has negative coefficient of -2290.45 but it is not significant (t(4733) = -0.74, p = 0.46, 95% CI [-8363.96, 3783.06]). The interaction between Rule of 6 Indoor with time variables are all not significant, except for the interaction with Sunday (coefficient = 8951.19, (t(4733) = 2.13, p = 0.03, 95% CI [-215.60, 16493.11])). Eat Out to Help Out policy was implemented in the UK for a very short period of time (August 2020), so this policy should be little to no effect to the bike hires.</h1>
+4. The interaction between wfh and Rule of 6 Indoor scheme gives negative impact to bike hires but it is not significant, coefficient = -2018.61 (t(4733) = -0.639, p = 0.52, 95% CI [-8215.81, 4178.59]). It suggest that only a small number of occurrence where wfh and Rule of 6 Indoor are applied together.</h1>
+
+```{r}
+# Model comparison between multiple linear regression with time variables and and without without time variables
+anova(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.intr, m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.time)
+```
+Using ANOVA test, we compare the regression model before and after we combine time variables (day, month, year) as additional predictors. The result shows that the model is significantly improved by adding and interacting 3 schemes with time variables (F(64,4733) = 110.48, p<0.001). Therefore, increasing the complexity of the model by including interaction terms with day, month and year, improves the model's ability to explain variation in bike hires.
+
+```{r include=FALSE}
+# Emmeans for the regression model with time variables
+emm.model.time <- emmeans(m.hires.by.wfh.rule_of_6_indoors.eat_out_to_help_out.time, ~ wfh * rule_of_6_indoors * eat_out_to_help_out + day + month + year)
+summary(emm.model.time)
+emm.model.time.means.ci <- confint(emm.model.time)
+```
+
+```{r}
+# Filter rows without NA in the summary of emmeans
+filtered.summary.emmeans <- emm.model.time[complete.cases(summary(emm.model.time)), ]
+print(filtered.summary.emmeans)
+```
+
+```{r}
+# Filter rows without NA in the means and confidence intervals
+filtered.means.ci <- emm.model.time.means.ci[complete.cases(emm.model.time.means.ci), ]
+print(filtered.summary.emmeans)
+```
+
+```{r warning=FALSE, fig.width=10, fig.height=10}
+ggplot.wfh.emm <- ggplot(summary(emm.model.time), aes(x=year, y=emmean, ymin=lower.CL, ymax=upper.CL, col=wfh)) + geom_point() + geom_linerange(alpha=5) + labs(x="Year", y="Number of Bike Hires", col="Working from Home", subtitle="Error Bars are 95% CIs")
+
+ggplot.rule_of_6_indoors.emm <- ggplot(summary(emm.model.time), aes(x=year, y=emmean, ymin=lower.CL, ymax=upper.CL, col=rule_of_6_indoors)) + geom_point() + geom_linerange(alpha=5) + labs(x="Year", y="Number of Bike Hires", col="Rule of 6 Indoor", subtitle="Error Bars are 95% CIs")
+
+ggplot.eat_out_to_help_out.emm <- ggplot(summary(emm.model.time), aes(x=year, y=emmean, ymin=lower.CL, ymax=upper.CL, col=eat_out_to_help_out)) + geom_point() + geom_linerange(alpha=5) + labs(x="Year", y="Number of Bike Hires", col="Eat Out to Help Out", subtitle="Error Bars are 95% CIs")
+
+ggarrange(ggplot.wfh.emm, ggplot.rule_of_6_indoors.emm, ggplot.eat_out_to_help_out.emm, ncol = 1, nrow = 3)
+```
+Here, we try to see the estimated marginal means (emmeans) and corresponding confidence intervals fpr the combination of wfh, rule_of_6_indoors, and eat_out_to_help_out1 and their interaction with time (day, month, year). The blue coloured-dots across the year indicate changes in bike hires' mean due to the three COVID-19 policy’s interactions with time. It is shown that number of bike hires is lower when wfh policy is applied (blue colour) compared to when wfh policy is not applied (red colour). When rule of 6 indoors is applied, the number of bike hires seems to be increasing but as it is not significant as per the regression model result. Eat out help out seems have no effect to the mean of bike hires, which is synchronize with the regression model's result.</h1>
+
+### Conclusion For Question 1
+The regression model provides insights into the effects of COVID-19 policies on bike hires, considering interactions with time variables. In the first analysis, we only make interaction of 3 schemes in the regression model (Work From Home, Rule of 6 Indoors, and the Eat Out to Help Out)  and the result is that all 3 schemes have positive impact to the bike hires, meaning when those schemes are implemented by the UK government during COVID-19, number of bike hires seems to increase. However, when we try to control for the effect of potential differences between different years, months, and days, the result is different. In the second analysis, the model tells us that Work From Home has a significant negative impact during weekdays but a positive impact on weekends. It means wfh policy makes the number of bike hires decreases during weekday since people are working from home, while it boosts the number of bike hires during weekend since people mostly are having the day off and go outside for recreation after 5 days stay at home to work. Rule of 6 Indoors and Eat Out to Help Out show limited or no significant effects on bike hires overall.
+
+By comparing the result of those two analysis, we can say that interaction effects between policies are generally not significant, but including time variables (day, month, year) significantly improves the model's explanatory power. This analysis helps in understanding how various factors contribute to the observed variations in bike hires during the COVID-19 period, considering both main effects and interaction effects with time variables.
+
+Another thing to highlight is that Work From Home, Rule of 6 Indoors, and the Eat Out to Help Out are policies that were issued by government to overcome and prevent the effect of COVID-19. The dataset provided was collected from 2010, which means those policies were not present pre-COVID-19. Thus, there will be some bias when examining the effect of these elements upon the number of bike rentals. 
+
+---
+
+
+# Question 2
+
+### Data Dictionary
+
+Variable        | Description
+--------------  | -----------------------------------------------------
+sold.by         | The name of the publishers
+publisher.type  | The type of the publishers
+genre           | The genre of the books
+avg.review      | The average of review scores of the books
+daily.sales     | The average number of book daily sales
+total.reviews   | The total number of reviews given to each book
+sale.price      | The price of the book
+
+This is the list of variables for the data of London bike hires.
+
+### Data Preparation
+```{r message=FALSE, warning=FALSE}
+# Read the data
+publisher.sales <- read_csv('publisher_sales.csv')
+```
+We read the dataset of book sales.
+
+```{r}
+# Us summary to check if there is anomaly in the data and see the distribution of values 
+summary(publisher.sales)
+str(publisher.sales)
+```
+We check the type of data using str function and try to find if there is any missing value (NA) in the data using summary function. Based on the summary, no missing value has been found.
+
+
+```{r}
+# Check the duplication in the dataset
+which(duplicated(publisher.sales))
+```
+Using function "which (duplicated)", we try to find if there is any duplication of the data in the dataset and we found no duplication.
+
+```{r}
+# Set the correct measurement level of data types
+col <- c('sold by', 'publisher.type', 'genre')
+publisher.sales[col] <- lapply(publisher.sales[col], as.factor)
+```
+We change the data type of "sold by", "publisher.type", and "genre" to factor so it can be used properly for ggplot.
+
+```{r}
+# Using histogram to check the distribution of daily.sales is normal or not
+ggplot(publisher.sales) + geom_histogram(aes(daily.sales), binwidth=0.9) + labs(title='Plot 2.1 Distribution of Book Daily Sales', x='Average Number of Book Daily Sales', y='Occurence (Count)')
+```
+</h1>Data daily.sales (average number of book daily sales) seems (roughly) normally distributed. 
+
+```{r}
+# Using histogram to check the distribution of avg.review is normal or not
+ggplot(publisher.sales) + geom_histogram(aes(avg.review), binwidth=0.1) + labs(title='Plot 2.2 Distribution of Average Review Scores', x='Average Review Scores', y='Occurence (Count)')
+```
+</h1>Data avg.review (average review scores) seems a little bit negative skew but it is still acceptable to be used on linear regression model.
+
+```{r}
+# Using histogram to check the distribution of total.reviews is normal or not
+ggplot(publisher.sales) + geom_histogram(aes(total.reviews), binwidth=1) + labs(title='Plot 2.3 Distribution of Total Number of Reviews', x='Total Number of Reviews', y='Occurence (Count)')
+```
+</h1>Data total.reviews (total number of reviews) seems to be slightly bimodal distributed. 
+
+```{r}
+# Using histogram to check the distribution of total.reviews is normal or not
+ggplot(publisher.sales) + geom_histogram(aes(sale.price), binwidth=0.1) + labs(title='Plot 2.4 Distribution of Sale Price', x='Sale Price', y='Occurence (Count)') 
+```
+</h1>Data sale.price (sale price) seems to have bimodal distribution.
+
+There are small number of data that seems to be outliers but since those values are not extreme, we can keep them and used for analysis.
+
+### Data Analysis Using Plot
+```{r message=FALSE, warning=FALSE}
+# Plotting the data of avg.review vs. daily.sales
+ggplot(publisher.sales, aes(x=avg.review, y=daily.sales)) + geom_point(aes(colour=genre)) + labs(x="Average Review Scores", y="Average Number of Daily Sales", title=expression('Plot 2.5 Average Daily Sales vs. Average Review Scores')) + geom_smooth(method=lm)
+```
+</h1>Plot 2.5 displays that average review scores has a slightly negative correlation with the average number of daily sales. The higher the average review scores of the book, the lower the average number of book daily sales.
+
+```{r message=FALSE, warning=FALSE}
+# Plotting the data of total.reviews vs. daily.sales
+ggplot(publisher.sales, aes(x=total.reviews, y=daily.sales)) + geom_point(aes(colour=genre)) + labs(x="Total Number of Reviews", y="Average Number of Daily Sales", title=expression('Plot 2.6 Average Daily Sales vs. Total Number of Reviews')) + geom_smooth(method=lm)
+```
+</h1>As we can see from the above Plot 2.6, the total number of reviews seems to have a positive correlation to the average number of daily sales. The higher the total number of review, the higher the average number of daily sales. We can also see from Plot 2.6 that YA_fiction (young adult) genre has the highest total number of reviews and non-fiction genre has the lowest total number of reviews.
+
+```{r message=FALSE, warning=FALSE}
+# Plotting the data of total.reviews vs. avg.review
+ggplot(publisher.sales, aes(x=total.reviews, y=avg.review)) + geom_point(aes(colour=genre)) + labs(x="Total Number of Reviews", y="Average Review Scores", title=expression('Plot 2.7 Total Number of Reviews vs. Average Review Scores')) + geom_smooth(method=lm)
+```
+</h1>Plot 2.7 above shows that the average review scores mostly lies between score 3 and 5. It suggests that there is no correlation between total number of reviews and average review scores.
+
+### Correlation and Regression Model for Average Review Scores and Total Number of Reviews
+```{r}
+# Use Pearson correlation matrix to show the correlation between each pair of variables (correlation coefficient and p-value)
+rcorr(as.matrix(select(publisher.sales, daily.sales, avg.review, total.reviews)))
+```
+The correlation between avg.review and total.reviews is significant under NHST, which means the r-value is not zero. We can see that avg.review and total.reviews have a quite low r value = 0.09 and they have 0.81% of shared variance. This suggests that we shouldn't have any problems with multicollinearity if we use them both as predictors in a multiple regression.
+
+```{r}
+# Use Spearman correlation matrix to show the correlation between each pair of variables (correlation coefficient and p-value)
+rcorr(as.matrix(select(publisher.sales, daily.sales, avg.review, total.reviews)), type = "spearman")
+```
+Since the distributions of avg.review and total.reviews appear visually to be a little bit negative skew and potentially slightly bimodal respectively, we try to compare the result of Pearson and Spearman correlation. If we use Spearman correlation matrix, the result of r value is even lower (r value = 0.02), meaning we don't have problem with multicollinearity when avg.review and total.reviews are used together in regression model. 
+
+```{r}
+# Simple linear regression for average number of daily sales and average review scores
+m_daily.sales_by_avg.review <- lm(daily.sales~avg.review, data=publisher.sales)
+summary(m_daily.sales_by_avg.review)
+cbind(coef(m_daily.sales_by_avg.review), confint(m_daily.sales_by_avg.review))
+```
+The simple linear regression model between average number of daily sales and average review scores shows us that for every 1 point increase in average review score, there is a drop of of average daily sales by 1 unit (t(5998) = -1.54, p = 0.12, 95% CI [-2.40, 0.29]), but it is not statistically significant since p-value > 0.005.
+
+```{r}
+# Simple linear regression for average number of daily sales and total number of reviews
+m_daily.sales_by_total.reviews <- lm(daily.sales~total.reviews, data=publisher.sales)
+summary(m_daily.sales_by_total.reviews)
+cbind(coef(m_daily.sales_by_total.reviews), confint(m_daily.sales_by_total.reviews))
+```
+The simple linear regression model between average number of daily sales and total number of reviews shows us that when the total number of reviews increases by 1 unit, the average daily sales is predicted to increase by 1 unit (t(5998) = 67.97, p<0.001, 95% CI [0.51, 0.51]).
+
+```{r}
+# Multiple linear regression without interaction for average number of sales, average review scores, and total number of reviews
+m_daily.sales_by_avg.review_total.reviews <- lm(daily.sales~avg.review + total.reviews, data=publisher.sales)
+summary(m_daily.sales_by_avg.review_total.reviews)
+cbind(coef(m_daily.sales_by_avg.review_total.reviews), confint(m_daily.sales_by_avg.review_total.reviews))
+```
+When estimating the effect of both average review scores and number of reviews in the same regression, we find that the increase of 1 point in average review score predicts 4 units drop of average daily sales (t(5997) = -8.364, p<0.001, 95% CI [-5.32, -3.29]) and an increase in total number of reviews by 1 count predicts an increase in average daily sales of 0.53 (t(5997) = 68.84, p<0.001, 95% CI [0.52, 0.55]).
+
+```{r}
+# Multiple linear regression with interaction for average number of sales, average review scores, and total number of reviews
+m_daily.sales_by_avg.review_total.reviews_intr <- lm(daily.sales~avg.review * total.reviews, data=publisher.sales)
+summary(m_daily.sales_by_avg.review_total.reviews_intr)
+cbind(coef(m_daily.sales_by_avg.review_total.reviews_intr), confint(m_daily.sales_by_avg.review_total.reviews_intr))
+```
+Here, interaction term is included in the model and the result shows that the interaction of average review score and total number of reviews is a significant predictor for average number of daily sales (t(5996) = 12.18, p <0.001, 95% CI [0.08, 0.11]).
+
+```{r}
+# Check the multicollinearity for multiple linear regression (avg.review and total.reviews as predictors)
+vif(m_daily.sales_by_avg.review_total.reviews)
+```
+We use Variance Inflation Factor scores (VIFs) to get a measure of collinearity within our regression model. Generally, VIF scores of less than 5 don’t warrant any further action. Based on the low VIF score above, avg.review and total.reviews do not cause multicollinearity and can be used as predictors in the same model.
+
+```{r}
+# Model comparison between multiple linear regression without interaction and with interaction (avg.review and total.reviews as predictors)
+anova(m_daily.sales_by_avg.review_total.reviews, m_daily.sales_by_avg.review_total.reviews_intr)
+```
+The model comparison test shows that the overall model fit is significantly improved (F(1,5996) = 148.45, p <0.001). Therefore, increasing the complexity of the model by including interaction terms improves the model's ability to explain variation in average number of daily sales.   
+
+```{r}
+# Estimated Marginal Means (Emmeans) for interaction between avg.review and total.reviews 
+emm.model.daily.sales.avg.review.total.reviews <- emmeans(m_daily.sales_by_avg.review_total.reviews_intr, ~ avg.review * total.reviews)
+summary(emm.model.daily.sales.avg.review.total.reviews)
+emm.model.daily.sales.avg.review.total.reviews.means.ci <- confint(emm.model.daily.sales.avg.review.total.reviews)
+```
+At an average review score of 4.27 with a total of 133 reviews, the estimated marginal mean is 86.2, 95% CI [85.6, 86.7]. This suggests that, based on the model and predictor variables, we are reasonably confident that the true average outcome value falls within this interval.
+
+```{r, fig.width=10, message=FALSE, warning=FALSE}
+# Interquartile plot to help analysing which variable is matter more: avg.review or total.reviews?
+avg.review.bins <- quantile(pull(publisher.sales, avg.review))
+publisher.sales <- publisher.sales %>% mutate(avg.review.bins=cut(avg.review, avg.review.bins, include.lowest=TRUE))
+
+total.reviews.bins <- quantile(pull(publisher.sales, total.reviews))
+publisher.sales <- publisher.sales %>% mutate(total.reviews.bins=cut(total.reviews, total.reviews.bins, include.lowest=TRUE))
+
+grid.arrange(
+	ggplot(publisher.sales, aes(x=avg.review, y=daily.sales, col=total.reviews.bins)) + geom_point() + geom_smooth(method=lm) + geom_smooth(mapping=aes(col=NULL), method=lm, col="black") + labs(x="Average Review Scores", y="Average Number of Daily Sales", col="Total Number of Reviews"),
+	ggplot(publisher.sales, aes(x=total.reviews, y=daily.sales, col=avg.review.bins)) + geom_point() + geom_smooth(method=lm) + geom_smooth(mapping=aes(col=NULL), method=lm, col="black") + labs(x="Total Number of Reviews", y="Average Number of Daily Sales", col="Average Review Scores")
+)
+```
+We can see from the top subplot that there is not a super obvious slope between average review scores and average number of daily sales, but the dot colours for the total number of reviews are higher up. The slopes of the lines show that there is not a very big reduction in average number of daily sales as average review scores increases, but the lines are very separated, indicating more sales for the higher total number of reviews quartiles.
+
+In the bottom subplot, the points and slopes are defined by total number of reviews and they show a noticeably steeper increase plotted against average number of daily sales. However, the different lines are now much closer together, indicating that the higher average review scores quartiles don't have very much higher average number of daily sales.
+
+### Data Analysis Using Plot for Each Genre
+```{r message=FALSE, warning=FALSE}
+# Plot for book with adult fiction genre
+publisher.sales.adult.fiction <- publisher.sales[publisher.sales$genre == "adult_fiction", ]
+
+ggplot(publisher.sales.adult.fiction, aes(x=sale.price, y=daily.sales)) + geom_point(aes(colour=genre)) + labs(x="Sale Price", y="Average Number of Daily Sales", title=expression('Plot 2.8 Average Daily Sales vs. Sale Price for Adult Fiction')) + geom_smooth(method=lm)
+```
+</h1>In Plot 2.8, we are shown that sales price has negative correlation with adult fiction book. When sale price increases, average number of daily sales of adult fiction book decreases.
+
+```{r message=FALSE, warning=FALSE}
+# Plot for book with young adult fiction (YA fiction) genre
+publisher.sales.YA.fiction <- publisher.sales[publisher.sales$genre == "YA_fiction", ]
+
+ggplot(publisher.sales.YA.fiction, aes(x=sale.price, y=daily.sales)) + geom_point(aes(colour=genre)) + labs(x="Sale Price", y="Average Number of Daily Sales", title=expression('Plot 2.9 Average Daily Sales vs. Sale Price for Young Adult Fiction')) + geom_smooth(method=lm)
+```
+</h1>Plot 2.9 displays that sales price has negative correlation with young adult fiction book. When sale price increases, average number of daily sales of young adult fiction book decreases.
+
+```{r message=FALSE, warning=FALSE}
+# Plot for book with non-fiction genre
+publisher.sales.non.fiction <- publisher.sales[publisher.sales$genre == "non_fiction", ]
+
+ggplot(publisher.sales.non.fiction, aes(x=sale.price, y=daily.sales)) + geom_point(aes(colour=genre)) + labs(x="Sale Price", y="Average Number of Daily Sales", title=expression('Plot 2.10 Average Daily Sales vs. Sale Price for Non-Fiction')) + geom_smooth(method=lm)
+```
+</h1>We can see from Plot 2.10, sales price seems to have no correlation with non-fiction book, which means the increase of decrease of sales price does not impact the average number of daily sales of non-fiction book.
+
+```{r message=FALSE, warning=FALSE}
+# Plot for book of all genres
+ggplot(publisher.sales, aes(x=sale.price, y=daily.sales)) + geom_point(aes(colour=genre)) + labs(x="Sale Price", y="Average Number of Daily Sales", title=expression('Plot 2.11 Average Daily Sales vs. Sale Price')) + geom_smooth(method=lm)
+```
+</h1>Plot 2.11 suggests that average daily sales of book generally negatively correlates with sale price. The more expensive the sale price, the lower the average daily sales of book. This can be an indication that less number of people will buy expensive book.
+
+### Regression Model for Sale Price and Genre
+```{r}
+# Simple linear regression for average number of daily sales and sale price
+m_daily.sales_by_sale.price <- lm(daily.sales~sale.price, data=publisher.sales)
+summary(m_daily.sales_by_sale.price)
+cbind(coef(m_daily.sales_by_sale.price), confint(m_daily.sales_by_sale.price))
+```
+The simple linear regression model between average number of daily sales and sale price shows us that for every 1 GBP increase in price, 3 fewer units of books are sold (t(5998) = -45.68, p <0.001, CI [-4.15, -3.81]).
+
+```{r}
+# Multiple linear regression for average number of daily sales, sale price, and genre without interaction
+m_daily.sales_by_sale.price_genre <- lm(daily.sales~sale.price + genre, data=publisher.sales)
+summary(m_daily.sales_by_sale.price_genre)
+cbind(coef(m_daily.sales_by_sale.price_genre), confint(m_daily.sales_by_sale.price_genre))
+```
+When we include genre as a predictor in the regression model, we can interpret the model as below.</h1>
+1. For 1 GBP increase in sale price, daily sales are estimated to decrease by approximately 1.43 units (t(5996) = -9.99, p<0.001, CI [-1.71, -1.15]).</h1>
+2. Compared to the reference genre (adult fiction), the genre non-fiction is associated with a decrease of approximately 9.03 units in average number of daily sales (t(5996) = -7.38, p<0.001, CI [-11.42, -6.63]).</h1>
+3. Compared to the reference genre (adult fiction), the genre young adult fiction is associated with an increase of approximately 30.48 units in average number of daily sales (t(5996) = 43.59, p<0.001, CI [29.11, 31.85]).</h1>
+The model suggests that both sale price and genre are significant predictors of daily sales. Higher sale price is correlated with lower average number of daily sales, and different genres have different effects on daily sales compared to the reference genre (adult fiction). The adjusted R-squared suggests that the model is a good fit for the data (0.46).
+
+```{r}
+# Multiple linear regression for average number of daily sales, sale price, and genre with interaction
+m_daily.sales_by_sale.price_genre_intr <- lm(daily.sales~sale.price * genre, data=publisher.sales)
+summary(m_daily.sales_by_sale.price_genre_intr)
+cbind(coef(m_daily.sales_by_sale.price_genre_intr), confint(m_daily.sales_by_sale.price_genre_intr))
+```
+By making sale price and genre as interaction, we we can interpret the model as below.</h1>
+1. For 1 GBP increase in sale price, daily sales are estimated to decrease by approximately 0.71 units (t(5994) = -2.85, p = 0.004, CI [-1.19, -0.22]).</h1>
+2. Compared to the reference genre (adult fiction), the genre non-fiction is associated with a decrease of approximately 23.63 units in average number of daily sales (t(5994) = -5.64, p<0.001, CI [-31.84, -15.42]).</h1>
+3. Compared to the reference genre (adult fiction), the genre young adult fiction is associated with an increase of approximately 52.97 units in average number of daily sales (t(5994) = 18.44, p <0.001, CI [47.34, 58.60]).</h1>
+4. Interaction of sale.price and non_fiction represents the change in the effect of sale price on daily sales when the genre non-fiction is compared to the genre adult fiction. The interaction of them is not statistically significant = 0.64 (p-value = 0.066).</h1>
+5. Interaction of sale.price and YA_fiction represents the change in the effect of sale price on daily sales when the genre young adult fiction is compared to the genre adult fiction. The interaction of them is statistically significant = -2.83 (t(5994) = -8.08, p <0.001, CI [-3.51, -2.14]).</h1>
+The model suggests that the relationship between sale price and average number of daily sales depends on the genre. Specifically, non-fiction genre has different interaction effect with sale price compared to adult fiction genre. Similarly, genre young adult fiction also has different interaction effect with sale price compared to adult fiction genre.
+
+```{r}
+# Model comparison between multiple linear regression without interaction and with interaction (sale.price and genre as predictors)
+anova(m_daily.sales_by_sale.price_genre, m_daily.sales_by_sale.price_genre_intr)
+```
+The ANOVA test shows that the overall model fit is significantly improved (F(2,5994) = 56.63, p <0.001). Therefore, increasing the complexity of the model by including interaction terms between sale price and genre improves the model's ability to explain variation in average number of daily sales.  
+
+```{r}
+# Checking the multicollinearity for multiple linear regression
+vif(m_daily.sales_by_sale.price_genre)
+```
+The VIF scores of sale price and genre are less than 5 and do not cause multicollinearity, therefore, they can be used as predictors in the same model.
+
+```{r}
+# Emmeans for regression model with interaction between sale price and genre
+emm_daily.sales_by_sale.price_genre_intr <- emmeans(m_daily.sales_by_sale.price_genre_intr, ~ sale.price * genre)
+summary(emm_daily.sales_by_sale.price_genre_intr)
+emm_daily.sales_by_sale.price_genre_intr_means_ci <- confint(emm_daily.sales_by_sale.price_genre_intr)
+```
+Emmeans helps to provide more insights into the average number of daily sales for different combinations of sale price and genre.</h1>
+1. The estimated mean daily sales for a sale price of 10.3 in the adult fiction genre is 80.9, 95% CI [79.4, 82.4].</h1> 
+2.The estimated mean daily sales for a sale price of 10.3 in the non_fiction genre is 63.8, 95% CI [61.4, 66.3].</h1> 
+3. The estimated mean daily sales for a sale price of 10.3 in the young adult fiction genre is 104.7, 95% CI [103.3, 106.2].</h1>
+4. Young adult fiction has the highest estimated mean, followed by adult fiction and non fiction.</h1>
+The confidence intervals help to measure the uncertainty in these estimations.
+
+### Conclusion for Question 2
+The regression models for book sales indicate that total number of reviews are a strong predictor of book sales. In contrast, average review scores have no substantial impact for average number of daily sales. Sale price has an effect on the average number of daily sales, which is tempered by the genre. To be more specific, the non-fiction and young adult fiction genres demonstrate different interaction effects with sale price in comparison to the adult fiction category. 
+
+

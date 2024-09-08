@@ -1,0 +1,493 @@
+---
+title: 'Business Statistics End of Term Assessment IB94X0 2023-2024'
+author: '5586298'
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+---
+
+# Loading the necessary libraries
+```{r setup, message=FALSE}
+
+# Loading the tidyverse package
+# tidyverse is a collection of R packages designed for data science. 
+# It includes packages like ggplot2 for plotting, dplyr for data manipulation, and more. 
+# It's a convenient way to load several useful packages at once.
+library(tidyverse)     
+
+# Loading the ggplot2 package
+# ggplot2 is a system for declaratively creating graphics, based on The Grammar of Graphics. 
+# It provides a powerful way of creating complex and aesthetically pleasing visualizations.
+library(ggplot2)       
+
+# Loading the dplyr package
+# dplyr is a grammar of data manipulation, providing a consistent set of verbs that help you 
+# solve the most common data manipulation challenges. It's particularly good for 
+# operations like filtering rows, selecting columns, rearranging data, and summarizing data.
+library(dplyr)         
+
+# Loading the lubridate package
+# lubridate is a package that makes it easier to work with dates and times in R. 
+# It provides functions to parse, manipulate, and do arithmetic with date-time objects.
+library(lubridate)     
+
+# Loading the tsibble package
+# tsibble is a package for tidy time series analysis. It extends the tidy data principles 
+# to time series, making time series analysis more consistent and understandable.
+library(tsibble)       
+
+# Loading the forecast package
+# forecast is a package for forecasting with R. It provides methods and tools for displaying and 
+# analyzing univariate time series forecasts including exponential smoothing via state space models 
+# and automatic ARIMA modelling.
+library(forecast)
+
+library(fable)
+
+library(conflicted)
+
+# Loading the necessary library for regression analysis
+library(lmtest)
+
+```
+
+---
+
+Rename this file and the folder it is in with your student number (e.g., "9999999.Rmd")
+
+Submit this file and the knitted html as a zip file (e.g., 9999999.zip) _by right clicking on the folder to zip it_. That is, the zip file 9999999.zip should contain the folder 9999999 with _only_ the files 9999999.Rmd and 9999999.html
+
+This is to certify that the work I am submitting is my own. All external references and sources are clearly acknowledged and identified within the contents. I am aware of the University of Warwick regulation concerning plagiarism and collusion. 
+
+No substantial part(s) of the work  submitted  here has also been submitted by  me  in other assessments for accredited courses of study, and I acknowledge that if this has been done an appropriate reduction in the mark I might otherwise have received will be made
+
+---
+
+# Question 1
+
+Formatted text 
+
+### Reading in a CSV file and loading its contents into an R data frame
+
+```{r}
+
+# Loading data from a CSV file into an R data frame
+# The 'read.csv' function is used to read a file in table format and create a data frame from it.
+# "London_COVID_bikes.csv" is the name of the file we're reading. This file should be in your current working directory or provide the full path.
+# 'stringsAsFactors = TRUE' ensures that any string data is read in as factor data types, which is useful for categorical variables.
+bikes_data = read.csv("London_COVID_bikes.csv", stringsAsFactors = TRUE)
+
+# Displaying the first few rows of the data frame
+# The 'head' function is used to take a look at the first few rows of a data frame.
+# This is used to get an initial understanding of the structure and contents of the data, such as column names, types of data in each column, etc.
+head(bikes_data)
+
+```
+### Analyzing the dataset for missing values and understanding its structure
+
+```{r}
+
+# Convert factor columns to character type
+bikes_data$date <- as.character(bikes_data$date)
+bikes_data$day <- as.character(bikes_data$day)
+bikes_data$month <- as.character(bikes_data$month)
+
+
+# Check for missing values in the dataset
+# This line calculates the total number of missing (NA) values across the entire bikes_data dataframe.
+# 'is.na(bikes_data)' generates a logical matrix indicating which elements are NA.
+# 'sum(...)' then adds up all the TRUE values (representing NAs) in this matrix.
+missing_values <- sum(is.na(bikes_data))
+
+# Summary of the dataset to understand data types and potential issues
+# The 'summary' function provides a quick overview of the data in each column of the dataframe.
+# For numerical data, it gives measures like minimum, median, mean, maximum, etc.
+# For categorical data, it gives counts of different levels.
+# This is useful for getting a sense of the data, identifying anomalies, and understanding the distribution of values.
+summary(bikes_data)
+
+# Check the structure of the data
+# 'str' (structure) function displays the structure of the bikes_data object.
+# It gives a concise overview of the data frame, including the number of observations (rows),
+# the number of variables (columns), the data type of each column (e.g., int, chr, factor),
+# and the first few entries of each column.
+# This is helpful for understanding how the data is organized and what types of data it contains.
+str(bikes_data)
+
+# Check for duplicate dates
+duplicates <- bikes_data %>% 
+  dplyr::count(date) %>% 
+  dplyr::filter(n > 1)
+
+# View the duplicates
+print(duplicates)
+
+# Add a row number within each group of the same date
+bikes_data <- bikes_data %>%
+  group_by(date) %>%
+  mutate(row_number = row_number()) %>%
+  ungroup()
+
+# Identify the duplicates with more than one occurrence
+duplicates <- bikes_data %>% 
+  dplyr::count(date) %>% 
+  dplyr::filter(n > 1)
+
+# Filter out only the first occurrence of each duplicate date
+bikes_data <- bikes_data %>%
+  dplyr::filter(!(date %in% duplicates$date & row_number == 1))
+
+# Remove the row_number column as it's no longer needed
+bikes_data <- select(bikes_data, -row_number)
+
+# Convert 'date' column to Date type
+# This line converts the 'date' column in the bikes_data dataframe from its current format to a Date type.
+# 'as.Date()' is used to ensure that the column is correctly recognized as date data, 
+# which is crucial for any time series analysis or operations that require date calculations.
+bikes_data$date <- as.Date(bikes_data$date)
+
+# Check the result for the specific date after removing the first occurrence of duplicates
+print(bikes_data %>% dplyr::filter(date == as.Date("2021-12-13")))
+
+```
+
+### Data Preprocessing and Outlier Analysis
+
+```{r}
+
+# Convert 'day' and 'month' columns to factors with the correct order
+# This line converts the 'day' column into a factor with a specified order.
+# Factors are data types used for categorical variables and having an order is important for days of the week.
+# The levels argument explicitly sets the order from Monday to Sunday.
+bikes_data$day <- factor(bikes_data$day, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"), ordered = TRUE)
+
+# Similarly, this line converts the 'month' column into an ordered factor.
+# The months are ordered from January to December, which is important for any seasonal analysis.
+bikes_data$month <- factor(bikes_data$month, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), ordered = TRUE)
+
+# Check for missing values
+# This line calculates the total number of missing (NA) values in the bikes_data dataframe after the conversions.
+# It's a good practice to check for missing values after data transformations.
+sum(is.na(bikes_data))
+
+# Outlier Analysis for 'Hires'
+# This line provides a summary of the 'Hires' column, which includes statistical measures like minimum, maximum, median, mean, and quartiles.
+# It's useful for getting a sense of the distribution and spotting any potential outliers.
+summary(bikes_data$Hires)
+
+# This line creates a boxplot for the 'Hires' column.
+# Boxplots are useful for visualizing the distribution of data and identifying outliers.
+# The 'main' argument adds a title to the boxplot.
+boxplot(bikes_data$Hires, main = "Boxplot of Bike Hires")
+
+```
+### Identifying and Investigating Outliers in the Data
+
+```{r}
+
+# Identifying Outlier Values
+# Calculate the third quartile (Q3) of 'Hires'
+# This is the value below which 75% of the data fall.
+Q3 <- quantile(bikes_data$Hires, 0.75)
+
+# Calculate the first quartile (Q1) of 'Hires'
+# This is the value below which 25% of the data fall.
+Q1 <- quantile(bikes_data$Hires, 0.25)
+
+# Calculate the Interquartile Range (IQR)
+# IQR is a measure of statistical dispersion and is the difference between the 75th and 25th percentiles.
+# It's used to define the 'normal' range in a boxplot.
+IQR <- Q3 - Q1
+
+# Calculate the upper whisker for outlier detection
+# This is commonly set to Q3 + 1.5*IQR. Any data point beyond this range is typically considered an outlier.
+upper_whisker <- Q3 + 1.5 * IQR
+
+# Identify the outlier observations in the 'Hires' column
+# This creates a logical vector where each element is TRUE if the corresponding hire count is an outlier.
+outliers <- bikes_data$Hires > upper_whisker
+
+# Investigate Days with Zero Hires
+# This line filters the bikes_data dataframe to include only those rows where 'Hires' is zero.
+# It's useful to investigate any days where there were unexpectedly no bike hires.
+zero_hires_days <- bikes_data[bikes_data$Hires == 0, ]
+
+# Further inspection of outliers
+# This line creates a new dataframe, outlier_data, containing only the rows from bikes_data that are outliers.
+# It's useful for further analysis of these extreme values.
+outlier_data <- bikes_data[outliers, ]
+
+# Provide summaries of the days with zero hires and the outlier days
+# These 'summary' functions give statistical summaries of the datasets created above.
+# This includes information like counts, mean, median, and quartile information for these specific subsets of data.
+summary(zero_hires_days)
+summary(outlier_data)
+
+
+```
+
+# Since zero hire days occur on two specific dates in September 2022, All have 'work from home' (wfh) as 1, which means there was a directive to work from home on those days, the days are weekends (Saturday and Sunday), which could be typical for lower hires but should not be zero under normal circumstances, we Need to investigate if there was a system issue, special event, or data recording error leading to zero hires.
+
+# For now however I have kept them included in our data since it will not significantly impact my results.
+
+# As for the outlier data, the dates range from July 2012 to November 2022, with the highest hire (Max. :73094) recorded. The presence of COVID-19 restrictions varies, some days have restrictions while others do not. There's a higher frequency of outliers in July, which could be due to summer weather prompting more bike hires. Some outliers occur during periods with multiple restrictions (schools_closed, pubs_closed, etc.), indicating that there might be other factors influencing the high number of hires (e.g., public transport avoidance).
+
+# For the current analysis I have decided to include the outliers but I will do a seperate analysis without them.
+
+
+### Aggregating and Visualizing Yearly Bike Hires
+
+```{r}
+
+# Aggregating hires by year
+# This line uses the 'aggregate' function to sum up all the bike hires ('Hires') for each year.
+# The formula 'Hires ~ year' indicates that we are aggregating 'Hires' based on the 'year' variable.
+# The result is stored in 'yearly_hires', which will have two columns: 'year' and the total 'Hires' for each year.
+yearly_hires <- aggregate(Hires ~ year, data = bikes_data, sum)
+
+# Inspecting the structure of the aggregated data
+# The 'str' function provides a concise structure of the 'yearly_hires' dataframe. 
+# It's helpful to understand the format of the data, especially after aggregation.
+str(yearly_hires)
+
+# Providing a summary of the aggregated data
+# The 'summary' function gives a statistical summary of the 'yearly_hires' dataframe, 
+# including information like minimum, maximum, median, mean, etc. for each column.
+summary(yearly_hires)
+
+# Bar graph of total hires per year
+# This code block creates a bar graph using ggplot2.
+# 'aes(x = factor(year), y = Hires, fill = factor(year))' sets up the aesthetics of the plot, 
+# mapping 'year' to the x-axis, 'Hires' to the y-axis, and also uses 'year' to determine the fill color.
+# 'geom_bar(stat = "identity")' tells ggplot2 to create a bar plot with heights equal to the 'Hires' values.
+# 'theme_minimal()' applies a minimal theme to the plot for a clean look.
+# 'labs(...)' is used to add labels to the axes and a title to the plot.
+# 'theme(legend.position = "none")' removes the legend as it's not needed (the years are already on the x-axis).
+ggplot(yearly_hires, aes(x = factor(year), y = factor(Hires), fill = factor(year))) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(x = "Year", y = "Number of Hires", title = "Yearly Hires") +
+  theme(legend.position = "none")
+
+```
+### Time Series Decomposition of Bike Hires
+
+```{r}
+
+# Time Series Plot
+# This line converts the 'Hires' column from the bikes_data dataframe into a time series object.
+# 'ts()' is the function used for creating time series objects in R.
+# The 'frequency' parameter is set to 365, assuming daily data and capturing yearly seasonality.
+# The resulting time series object is stored in 'hires_ts'.
+hires_ts <- ts(bikes_data$Hires, frequency = 365)
+
+# Decomposing the time series
+# The 'decompose()' function is applied to the 'hires_ts' time series object.
+# It decomposes the time series into seasonal, trend, and random components.
+# This is useful for understanding the underlying patterns in the data, such as seasonality and long-term trends.
+# The result of the decomposition is stored in 'decomposed_ts'.
+decomposed_ts <- decompose(hires_ts)
+
+# Plotting the decomposed time series
+# The 'plot()' function is used to create a plot of the decomposed time series.
+# This plot will typically show the original data, the trend component, the seasonal component, and the random (residual) component.
+# It's a useful visualization to understand how these components contribute to the overall time series.
+plot(decomposed_ts)
+
+```
+
+### Comparative Analysis of "Pre, During and Post" COVID Hires
+
+```{r}
+
+# Create a categorical variable for pre, during, and post COVID-19 restrictions
+# This line creates a new column 'COVID_period' in the bikes_data dataframe.
+# The 'cut' function is used to categorize the dates into three periods: Pre-COVID, During COVID, and Post-COVID,
+# based on the specified date ranges.
+# 'as.Date(c('...'))' defines the breakpoints for these periods.
+# 'labels' assigns names to each period.
+# 'include.lowest = TRUE' ensures that the earliest date is included in the first interval.
+bikes_data$COVID_period <- cut(bikes_data$date,
+                               breaks = as.Date(c('2010-01-01', '2020-03-15', '2021-06-30', '2023-12-31')),
+                               labels = c('Pre-COVID', 'During COVID', 'Post-COVID'),
+                               include.lowest = TRUE)
+
+# Summarizing bike hires before the COVID-19 period (Pre-COVID)
+# This line filters the dataset for dates before March 1, 2020, and then pulls out the 'Hires' column.
+# The 'summary' function provides a statistical summary (like min, max, median) for the 'Hires' data in this period.
+summary(bikes_data %>% dplyr::filter(date < as.Date("2020-03-01")) %>% pull(Hires)) # before
+
+# Summarizing bike hires during the early COVID-19 period
+# This line filters for dates between March 1, 2020, and March 1, 2021, representing the early period of COVID-19.
+# It then provides a statistical summary for the 'Hires' data during this period.
+summary(bikes_data %>% dplyr::filter(date >= as.Date("2020-03-01"), date <= as.Date("2021-03-01")) %>% pull(Hires)) # during
+
+# Summarizing bike hires after the early COVID-19 period (Post-COVID)
+# Similar to the above, this line filters for dates after March 1, 2021, and summarizes the 'Hires' data for this later period.
+summary(bikes_data %>% dplyr::filter(date > as.Date("2021-03-01")) %>% pull(Hires)) # after
+
+# Compare averages in each COVID-19 period
+# This block of code groups the data by the 'COVID_period' and then calculates the average number of bike hires in each period.
+# 'group_by(COVID_period)' groups the data by the COVID-19 periods defined earlier.
+# 'summarize(Average_Hires = mean(Hires, na.rm = TRUE))' calculates the mean hires for each group, ignoring NA values.
+bikes_data %>%
+  group_by(COVID_period) %>%
+  summarize(Average_Hires = mean(Hires, na.rm = TRUE))
+
+```
+
+### Correlation Analysis
+
+```{r}
+
+# Converting factors to numeric
+# These lines convert the specific COVID-19 restriction variables in the bikes_data dataframe from factor (or character) 
+# to numeric. This is necessary because correlation calculations require numeric variables.
+
+bikes_data$schools_closed <- as.numeric(bikes_data$schools_closed)
+bikes_data$pubs_closed <- as.numeric(bikes_data$pubs_closed)
+bikes_data$shops_closed <- as.numeric(bikes_data$shops_closed)
+bikes_data$eating_places_closed <- as.numeric(bikes_data$eating_places_closed)
+bikes_data$stay_at_home <- as.numeric(bikes_data$stay_at_home)
+bikes_data$household_mixing_indoors_banned <- as.numeric(bikes_data$household_mixing_indoors_banned)
+bikes_data$wfh <- as.numeric(bikes_data$wfh)
+bikes_data$rule_of_6_indoors <- as.numeric(bikes_data$rule_of_6_indoors)
+bikes_data$curfew <- as.numeric(bikes_data$curfew)
+bikes_data$eat_out_to_help_out <- as.numeric(bikes_data$eat_out_to_help_out)
+
+# Calculating correlation for each variable
+# These lines calculate the Pearson correlation coefficient between the number of bike hires (Hires) 
+# and all the restriction variables individually. 
+# This helps understand the linear relationship between bike hires and each restriction.
+
+cor_schools <- cor(bikes_data$Hires, bikes_data$schools_closed, method = "pearson")
+cor_pubs <- cor(bikes_data$Hires, bikes_data$pubs_closed, method = "pearson")
+cor_shops <- cor(bikes_data$Hires, bikes_data$shops_closed, method = "pearson")
+cor_eating <- cor(bikes_data$Hires, bikes_data$eating_places_closed, method = "pearson")
+cor_stayhome <- cor(bikes_data$Hires, bikes_data$stay_at_home, method = "pearson")
+cor_household_mixing <- cor(bikes_data$Hires, bikes_data$household_mixing_indoors_banned, method = "pearson")
+cor_wfh <- cor(bikes_data$Hires, bikes_data$wfh, method = "pearson")
+cor_rule_of_6 <- cor(bikes_data$Hires, bikes_data$rule_of_6_indoors, method = "pearson")
+cor_curfew <- cor(bikes_data$Hires, bikes_data$curfew, method = "pearson")
+cor_eat_out <- cor(bikes_data$Hires, bikes_data$eat_out_to_help_out, method = "pearson")
+
+# Creating a named vector to display all correlations at once
+# This line creates a named vector that consolidates all the individual correlation values. 
+# Each correlation is named according to the restriction variable it corresponds to.
+
+correlations <- c(wfh = cor_wfh, rule_of_6_indoors = cor_rule_of_6, 
+                  eat_out_to_help_out = cor_eat_out)
+
+# Printing out the correlations
+# This line prints the named vector 'correlations' to the console,
+# displaying the correlation coefficients for each restriction variable with bike hires.
+
+print(correlations)
+
+```
+
+### Above is a list of correlation coefficients between the number of bike hires (`Hires`) and various COVID-19 restriction variables. Each line represents a different restriction and its associated Pearson correlation coefficient with the number of bike hires. Correlation coefficients range from -1 to 1, where 1 indicates a perfect positive linear relationship (as one variable increases, the other also increases). -1 indicates a perfect negative linear relationship (as one variable increases, the other decreases). 0 indicates no linear relationship (the variables do not tend to increase or decrease in tandem). 
+### Let's interpret each restriction's correlation with bike hires:
+## wfh (work from home): A positive correlation (0.076) suggests that bike hires slightly increased when there were more work from home orders.
+## rule_of_6_indoors: A positive correlation (0.134) suggests that bike hires tended to increase when the rule of 6 for indoor gatherings was in effect, which is more substantial than other coefficients.
+## eat_out_to_help_out: A positive correlation (0.077) suggests a slight increase in bike hires during the Eat Out to Help Out scheme.
+### These correlations are indicative of the relationships but do not imply causation. They should be interpreted with caution, considering other factors might be influencing bike hires. A small absolute value (close to 0) of a correlation coefficient indicates a weak relationship, while values closer to -1 or 1 suggest a stronger relationship. Negative values suggest an inverse relationship, while positive values suggest a direct relationship. 
+### In the context of this data, these correlation coefficients suggest that some COVID-19 restrictions like work from home directives and the rule of 6 for indoors, may correlate with slight increases in bike hires. These effects, however, are generally small and would need further investigation to fully understand their impact, including multivariate analysis to control for potential confounding factors.
+
+
+### Regression Analysis
+## Regression model of Work From Home
+```{r}
+
+rm_WFH <- lm(Hires ~ wfh, data = bikes_data)
+
+summary(rm_WFH)
+cbind(coef(rm_WFH), confint(rm_WFH))
+
+par(mfrow = c(2, 2))
+plot(rm_WFH)
+
+rm_WFH_ymd <- lm(Hires ~ wfh + year + month + day, data = bikes_data)
+
+summary(rm_WFH_ymd)
+cbind(coef(rm_WFH_ymd), confint(rm_WFH_ymd))
+
+par(mfrow = c(2, 2))
+plot(rm_WFH_ymd)
+
+```
+
+## Regression model of Rule of 6 indoors
+```{r}
+
+rm_r6 <- lm(Hires ~ rule_of_6_indoors, data = bikes_data)
+
+summary(rm_r6)
+cbind(coef(rm_r6), confint(rm_r6))
+
+par(mfrow = c(2, 2))
+plot(rm_r6)
+
+rm_r6_ymd <- lm(Hires ~ rule_of_6_indoors + year + month + day, data = bikes_data)
+
+summary(rm_r6_ymd)
+cbind(coef(rm_r6_ymd), confint(rm_r6_ymd))
+
+par(mfrow = c(2, 2))
+plot(rm_r6_ymd)
+
+```
+
+## Regression model of Eat out to help out
+```{r}
+
+rm_eoho <- lm(Hires ~ eat_out_to_help_out, data = bikes_data)
+
+summary(rm_eoho)
+cbind(coef(rm_eoho), confint(rm_eoho))
+
+par(mfrow = c(2, 2))
+plot(rm_eoho)
+
+rm_eoho_ymd <- lm(Hires ~ eat_out_to_help_out, data = bikes_data)
+
+summary(rm_eoho_ymd)
+cbind(coef(rm_eoho_ymd), confint(rm_eoho_ymd))
+
+par(mfrow = c(2, 2))
+plot(rm_eoho_ymd)
+
+```
+
+### Comparing Models using ANOVA
+```{r}
+
+# Comparing the three models using ANOVA
+anova(rm_WFH, rm_r6, rm_eoho)
+
+```
+
+
+
+
+
+
+
+
+---
+
+# Question 2
+
+Formatted text 
+
+```{r}
+# Commented R code here!
+
+
+
+```
+
+Formatted Text
+
+---

@@ -1,0 +1,234 @@
+---
+title: "Assignment 1"
+author: "5504970"
+date: "2023-10-22"
+output: html_document
+---
+
+# Section 1
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(emmeans)
+library(gridExtra)
+options(width=100)
+```
+
+
+
+### Data dictionary
+This is the list of variables for data of children in low income households.
+
+Variable       | Description
+-------------- | ---------------------------------------------------------
+Ward code      | Code for every ward in London
+Wards (2018)   | Name of every ward in London
+Borough        | Name of every  borough in London
+year           | Year 2014 until 2021 (8 years)
+
+
+
+### Children in low income homes by borough
+```{r message=FALSE, warning=FALSE}
+# Read the data of children in low income homes provided in csv format
+children_low_income <- read_csv('children_low_income_data.csv')
+
+# Group the data of children in low income homes by borough across all years and summarize them by showing average, standard deviation, minimum numbers, and maximum numbers
+(children_low_income_by_borough <- children_low_income %>%
+  group_by(Borough) %>%
+  summarise(
+    Average=floor(mean(children, na.rm=TRUE)),
+    Standard_Deviation=floor(sd(children, na.rm=TRUE)),
+    Minimum=min(children, na.rm=TRUE),
+    Maximum=max(children, na.rm=TRUE)
+    ) %>%
+   knitr::kable(caption = "Table 1. Children in Low Income Households by Borough", align = "lcccc")
+ )
+```
+We read the data of children in low income homes provided in csv format using read function. We group those data per borough and create a summary table that shows the average number of children, the standard deviation, the minimum number of children, and the maximum number of children across all years and wards in the dataset.
+
+
+
+### Exclude unusual boroughs
+```{r}
+# Filter and exclude the boroughs with unusual numbers
+children_low_income_new <- children_low_income %>%
+  group_by(year) %>%
+  filter(!(Borough%in%c("City of London", "Kensington and Chelsea", "Kingston upon Thames", "Richmond upon Thames", "Westminster")))
+```
+We exclude a small number of boroughs that are unusual by using filter function.
+
+
+
+### Visualise data for all years
+```{r message=FALSE, warning=FALSE}
+# Check the type of data and find missing values in "children" column
+str(children_low_income_new) 
+summary(children_low_income_new)
+```
+We check the type of data using str function and try to find if there is any missing value in the data using summary function. Based on summary, no missing value has been found.
+
+```{r message=FALSE, warning=FALSE}
+# Change the "year" column to factor before creating distribution plot
+children_low_income_new$year <- as.factor(children_low_income_new$year)
+```
+We change the data type of year to factor so it can be used properly for ggplot
+
+```{r message=FALSE, warning=FALSE}
+# Make the distribution plot for number of children in low income homes across all years using violin plot
+ggplot(children_low_income_new, aes(x=year, y=children, fill=children)) +
+  geom_violin(trim=FALSE, alpha = 0.5, aes(color=year)) +
+  stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), color="black", aes(shape="Mean with standard deviation")) +
+  labs(x="Year", y="Number of Children in Low Income Homes", title = "Figure 1. Distribution of Children in Low Income Households in Wards for Each Year") +
+  guides(col="none") + 
+  theme(legend.position="bottom", legend.title=element_blank(), plot.title = element_text(size = 12))
+```
+
+We create violin plot to see the distribution of children in low income households in wards for each year.
+
+
+
+### A t-test comparing earliest and latest year
+```{r}
+# Filter the dataset to include only data in year 2014 and 2021
+children_low_income_for_ttest <- filter(children_low_income_new, (year%in%c("2014","2021")))
+```
+```{r}
+# Use histogram to see if the distribution of the data is normal
+ggplot(children_low_income_for_ttest) + geom_histogram(aes(children), binwidth=50)
+```
+
+The histogram shows that the data year 2014 and 2021 is a little bit positive skew but we carry on to use t-test as requested. Since most of the data are distributed < 1000, we do not have to remove the outlier numbers.
+
+```{r}
+# Perform t-test for data across all years
+t.test(children~year, data=children_low_income_for_ttest)
+
+# Conduct estimation approach
+m_children_low_income_by_year <- lm(children~year, data=children_low_income_for_ttest)
+m_children_low_income_by_year_emm <- emmeans(m_children_low_income_by_year, ~year)
+m_children_low_income_by_year_contrast <- confint(pairs(m_children_low_income_by_year_emm))
+m_children_low_income_by_year_contrast
+```
+<br>
+<br>
+
+# Section 2 (Report)
+
+This report is presenting specifically the data of children living in low income households and intended to be used by the policy makers or local government taking care the condition of prosperity level of households in London. The dataset used in this report is taken from 2014 to 2021 (8 years).
+
+In the beginning, we summarize the dataset into a table that showing the average, standard deviation, minimum number, and maximum number of children across all years and wards for every borough in London.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+(children_low_income_by_borough <- children_low_income %>%
+  group_by(Borough) %>%
+  summarise(
+    Average=floor(mean(children, na.rm=TRUE)),
+    Standard_Deviation=floor(sd(children, na.rm=TRUE)),
+    Minimum=min(children, na.rm=TRUE),
+    Maximum=max(children, na.rm=TRUE)
+    ) %>%
+   knitr::kable(caption = "Table 1. Children in Low Income Households by Borough", align = "lcccc")
+ )
+```
+
+Based on the Table 1, for the past 8 years, Newham has the highest average number of children living in low income households (1213 children), where Tower Hamlets has the highest number of children living in low income households with 2094 children. Borough with the lowest number of children living in low income households is City of London with only 5 children.
+
+Initially, there are 33 boroughs in the raw data. But, as per request, we have excluded 5 boroughs deemed to be unusual, which are:</h1>
+1. City of London</h1>
+2. Kensington and Chelsea</h1>
+3. Kingston upon Thames</h1>
+4. Richmond upon Thames</h1>
+5. Westminster</h1>
+We did not include these 5 boroughs into our data processing and visualisation. We used 28 boroughs with 4480 observations from 2014 to 2021 for analysis. 
+
+Here, we have created a visualisation using violin plot to show the distribution of children in low income households in wards for each year.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(children_low_income_new, aes(x=year, y=children, fill=children)) +
+  geom_violin(trim=FALSE, alpha = 0.5, aes(color=year)) +
+  stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), color="black", aes(shape="Mean with standard deviation")) +
+  labs(x="Year", y="Number of Children in Low Income Homes", title = "Figure 1. Distribution of Children in Low Income Households in Wards for Each Year") +
+  guides(col="none") + 
+  theme(legend.position="bottom", legend.title=element_blank(), plot.title = element_text(size = 12))
+```
+
+Based on the plot in Figure 1, the trend is up and down. The average number of children living in low income households was increasing from 2014 to 2019 but it was lowering down in 2020 and 2021. The number of children in low income households distributed around the mean in 2014, but it slightly distributed further away from the mean across the years until 2019. The number of children in low income households was starting to distribute near the mean again in 2020.
+
+By using t-test to compare the dataset in the earliest year (2014) and the latest year (2021), we found that the mean of children in in low income households  2014 is 528 and the mean of children in low income households in 2021 is 603. The mean of children is significantly higher for year 2021, Welch $t(1095)=-4.02$, $p<.0001$, with a difference of 75, 95% confidence interval [-112 - -38.7].
+
+The analysis conclusions using t-test contain deficiencies that need to be improved. The data used in for t-test can be considered positively skew distributed. Even though the majority of data the lies < 1000, there are some data having a number > 1000. This makes the t-test result is potentially biased and we should be cautious to interpret the data with a more appropriate analysis method.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r eval=FALSE, include=FALSE}
+# No. 3 (with geom_jitter)
+
+# 
+# ggplot(children_low_income_new,aes(x=year,y=children, color=year)) + 
+#   geom_violin(scale="width") + 
+#   geom_jitter(aes(group=year), position=position_jitterdodge(jitter.width = 1)) + 
+#   stat_summary(fun.data=mean_sdl, fun.args = list(mult=1.5), geom="crossbar", 
+#      width=0.5, position=position_dodge(),show.legend = FALSE) + 
+#   theme(axis.text.x = element_text(angle = 45, margin=margin(0.5, unit="cm")))
+
+# geom_jitter(position = position_jitter(seed = 1, width = 0.1)) +
+# missing_values <- sum(is.na(children_low_income_new$children))
+
+
+# outliers <- boxplot(children_low_income_for_ttest$children)$out
+# children_low_income_for_ttest = filter(children_low_income_for_ttest,
+#                                        !(children%in%c(outliers)))
+
+# hist(children_low_income_for_ttest$children)
+```
+
+
+
+
+
+
+
+
+
+
+

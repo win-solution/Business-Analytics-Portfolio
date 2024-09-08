@@ -1,0 +1,131 @@
+---
+title: 'Business Statistics End of Term Assessment IB94X0 2023-2024 #1'
+author: '2182698'
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+---
+
+```{r setup, message=FALSE}
+library(tidyverse)
+library(emmeans)
+library(lubridate)
+library(Hmisc)
+```
+
+---
+
+Rename this file and the folder it is in with your student number (e.g., "9999999.Rmd")
+
+Submit this file and the knitted html as a zip file (e.g., 9999999.zip) _by right clicking on the folder to zip it_. That is, the zip file 9999999.zip should contain the folder 9999999 with _only_ the files 9999999.Rmd and 9999999.html
+
+*Academic Integrity Statement should go here*
+
+
+---
+# Question 2
+
+```{r}
+# Load the data using read_csv and save it as "book"
+book <- read_csv("publisher_sales.csv")
+```
+```{r}
+# See structure the data 
+str(book)
+
+# See summary the data
+summary(book)
+```
+Check missing values and duplicate values 
+```{r}
+sum(is.na(book))
+
+any(duplicated(book))
+```
+Convert the several columns as factor
+```{r}
+book$`sold by`<- as.factor(book$`sold by`)
+book$publisher.type <- as.factor(book$publisher.type)
+book$genre <- as.factor(book$genre)
+```
+
+Check the distribution
+```{r}
+hist(book$sale.price)
+```
+```{r}
+hist(book$daily.sales)
+```
+```{r}
+hist(book$total.reviews)
+```
+```{r}
+hist(book$avg.review)
+```
+```{r}
+levels(book$genre)
+summary(book$genre)
+ggplot(data=book, aes(x=genre, fill=genre)) + geom_bar()
+```
+```{r}
+levels(book$`sold by`)
+summary(book$`sold by`)
+ggplot(data=book, aes(x=`sold by`, fill=genre)) + geom_bar() + theme(axis.text.x = element_text(angle = 90))
+```
+```{r}
+levels(book$publisher.type)
+summary(book$publisher.type)
+ggplot(data=book, aes(x=publisher.type, fill=genre)) + geom_bar() + theme(axis.text.x = element_text(angle = 90))
+```
+```{r}
+ggplot(book, aes(x=total.reviews, y=avg.review))+geom_point()
+```
+```{r}
+ggplot(book, aes(x=avg.review, y=daily.sales))+geom_point(aes(colour=publisher.type))
+```
+```{r}
+ggplot(book, aes(x=total.reviews, y=daily.sales))+geom_point()
+```
+
+```{r}
+rcorr(book$avg.review,book$total.reviews)
+```
+
+
+
+Regression model for review_score to number of reviews
+```{r}
+model_reviews <- lm(daily.sales ~ avg.review * total.reviews, data = book)
+summary(model_reviews)
+```
+Regression model for sale price
+```{r}
+model_price <- lm(daily.sales ~ sale.price, data = book)
+summary(model_price)
+```
+Model sales.price and genre
+```{r}
+model_price_genre <- lm(daily.sales ~ sale.price * genre, data = book)
+summary(model_price_genre)
+```
+```{r}
+book2 <- book
+book2$log.avg.review <- sqrt(book$avg.review)
+book2 <- book2 %>% filter(!log.avg.review<1.5)
+model_reviews2 <- lm(daily.sales ~ log.avg.review + total.reviews, data = book2)
+summary(model_reviews2)
+hist(book2$log.avg.review)
+```
+
+
+
+Formatted text 
+
+```{r}
+# Commented R code here!
+```
+
+Formatted Text
+
+---
