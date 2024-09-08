@@ -1,0 +1,806 @@
+---
+title: "IB9BW0_Assignment"
+author: "Group_8"
+date: "2023-11-16"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+### 1. Title: Lead Conversion
+
+World Plus provides a range of banking products, including loans, investment options, savings accounts, and credit products.
+They aim to implement a lead prediction system to pinpoint prospective customers who will buy their new term deposit product. 
+This system will be used to identify the customers to contact through communication channels to sell the new term deposit product.
+
+They have provided a data set of historic customer records (that collected during a similar product offering). 
+
+The details for the dataset provided below.
+
+2. Number of Instances: 220000 
+
+3. Number of Variables: 16
+
+4. Attribute information:
+	
+  1) ID: customer identification number
+  2) Gender: gender of the customer
+  3) Age: age of the customer in years
+  4) Dependent: whether the customer has a dependent or not
+  5) Marital_Status: marital state (1=married, 2=single, 0 = others)
+  6) Region_Code: code of the region for the customer
+  7) Years_at_Residence: the duration in the current residence (in years)
+  8) Occupation: occupation type of the customer
+  9) Channel_Code: acquisition channel code used to reach the customer when they opened their bank account 
+  10) Vintage: the number of months that the customer has been associated with the company.
+  11) Credit_Product: if the customer has any active credit product (home loan, personal loan, credit card etc.)
+  12) Avg_Account_Balance: average account balance for the customer in last 12 months
+  13) Account_Type: account type of the customer with categories Silver, Gold and Platinum
+  14) Active: if the customer is active in last 3 months
+  15) Registration: whether the customer has visited the bank for the offered product registration (1 = yes; 0 = no)
+  16) Target: whether the customer has purchased the product, 
+	0: Customer did not purchase the product
+	1: Customer purchased the product
+
+```{r}
+
+suppressPackageStartupMessages({
+    library(tidyverse) # Collection of R packages for data science (includes ggplot2, dplyr, etc.)
+    library(dplyr) # Data manipulation
+    library(mltools) # Tools for data preprocessing, such as one-hot encoding
+    library(data.table) # Data manipulation with enhanced performance and syntax
+    library(caret) # Training and tuning machine learning models
+    library(ROSE) # Handling imbalanced datasets
+    library(CustomerScoringMetrics) # Metrics specific for customer scoring models
+    library(pROC) # Tools for visualizing and analyzing ROC curves
+    library(randomForest) # Random Forest algorithm for machine learning
+    library(randomForestSRC) # Random Forest for Survival, Regression, and Classification
+    library(C50) # C5.0 decision trees and rule-based models
+    library(party) # Recursive partitioning for classification, regression and survival trees
+    library(e1071) # Misc functions of the Department of Statistics (e1071), TU Wien, including SVM
+    library(splitstackshape) # Stacking and unstacking data, and converting data types
+    library(mice) # Imputing missing values using multiple techniques
+    library(conflicted) # Detect and resolve naming conflicts between packages
+    library(FSelector) # Feature selection algorithms
+    library(gbm) # Generalized Boosted Regression Models
+    library(caTools)
+    library(ROCR)
+    library(MASS)
+})
+
+
+```
+
+## Reading the data from the CSV file
+```{r}
+#Read data file
+data <- read.csv("assignment_data.csv")
+
+```
+
+## Checking the summary to analyze any potential data entry errors
+```{r}
+# Check summary of the data
+summary(data)
+```
+
+## Identifying the errors
+```{r}
+
+# From the summary output, we observe that the variable "Dependent" has a minimum value of -1 which is an error since this variable is binary. Also, it seems that the variable "Credit_Product" have a large number of missing values
+
+# View the first five rows
+head(data,5)  
+
+str(data)
+#When we check the structure of the data, some variables are stored as characters instead of categorical variables. Then we create a vector that stores all these variables
+
+col <- c("Gender", "Dependent", "Marital_Status", "Years_at_Residence", "Occupation", "Channel_Code", "Credit_Product", "Account_Type", "Active", "Registration", "Target")
+
+# Set the correct measurement levels of data types
+data[col] <- lapply(data[col], as.factor)
+
+```
+
+## Cleaning the data
+```{r}
+# Counting the number of rows where 'Dependent' is -1
+# This is done by comparing each value in 'Dependent' to -1 and summing up the TRUE values
+num_neg_ones <- sum(data$Dependent == -1)
+
+# Calculating the total number of rows in the dataset
+# This helps in understanding the scale of -1 values in comparison to the dataset size
+total_rows <- nrow(data)
+
+# Calculating the percentage of rows where 'Dependent' is -1
+# This is computed as the number of -1 values divided by total rows, multiplied by 100
+percentage_neg_ones <- (num_neg_ones / total_rows) * 100
+
+# Displaying the number of -1 values
+num_neg_ones
+
+# Displaying the percentage of -1 values
+percentage_neg_ones
+
+# Filter out the rows where 'Dependent' is -1
+data <- data[data$Dependent != -1, ]
+
+```
+
+```{r}
+
+# The reason we chose to remove the -1 values completely from our data is because they are too small (0.05%) to make a huge impact on our model's predictions
+
+#From our paper review, we found out that if the percentage of missing values NA < 5% then we remove missing values. Otherwise, we find an appropriate estimated value
+
+( missing_percentage <- sum(is.na(data$Credit_Product))* 100/ length(data$Credit_Product) )
+
+```
+
+```{r echo=FALSE, results='hide', message=FALSE}
+
+# We find that the percentage of NA values is 8.30%, thus we decide to use impute function from the mice package
+# Also since we will be using the column "Credit_Product" to predict the value of "Target", we decide to remove that column while using imputation to avoid corrupt predictions for our "Target".
+
+data$Credit_Product <- as.factor(data$Credit_Product)
+# Temporarily store the 'Target' column separately
+target_column <- data$Target
+
+# Create a new dataset without the 'Target' column
+data_without_target <- data[, !names(data) %in% "Target"]
+
+# Perform the imputation on the dataset without the 'Target' column
+imputed_data <- mice(data_without_target, m=5, maxit=50, method='pmm', seed=500)
+
+# Complete the imputed data
+completed_data <- complete(imputed_data, 1)
+
+# Reattach the 'Target' column to the completed dataset
+completed_data$Target <- target_column
+
+```
+
+```{r}
+
+# Review the imputed data
+table(completed_data$Credit_Product, useNA='ifany')
+
+data <- completed_data
+
+```
+
+
+```{r}
+
+#Update the credit_product and Gender column
+data$Active <- ifelse(data$Active == "Yes", 1, 0)
+data$Gender <- ifelse(data$Gender == "Female", 1,0)
+
+# Check the summary of the updated dataset
+summary(data)
+
+```
+
+```{r}
+#Check the distribution and plot of some variables
+ggplot(data, aes(x = Gender)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Age)) + geom_histogram(aes(color = Target, fill = Target), alpha = 0.7, position = "identity")+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Dependent)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Marital_Status)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Occupation)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Channel_Code)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Vintage)) + geom_histogram(aes(color = Target, fill = Target), alpha = 0.7, position = "identity")+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Credit_Product)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Account_Type)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Active)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Credit_Product)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Target)) +
+  geom_bar(aes(fill = factor(Target)), color = "black", alpha = 0.7) +
+  scale_fill_manual(values = c("#ff9999", "#66b3ff")) +
+  theme_minimal()
+#Imbalance data, much more data belongs to the "0" category, where the customer did not purchase the product
+```
+
+```{r}
+ggplot(data, aes(x = Account_Type)) + geom_bar(aes(color = Target, fill = Target), alpha = 0.7)+
+  scale_color_manual(values=c("#35ade4","black"))+
+  scale_fill_manual(values=c("#35ade4","#e46c35"))
+
+ggplot(data, aes(x = Avg_Account_Balance)) + 
+  geom_histogram(aes(color = Target, fill = Target), alpha = 0.7, position = "identity") +
+  scale_color_manual(values = c("#35ade4", "black")) +
+  scale_fill_manual(values = c("#35ade4", "#e46c35")) +
+  scale_x_continuous(labels = scales::number_format(scale = 1e-6)) +
+  xlab("Average Account Balance (in millions)")
+```
+
+```{r}
+#Check the total amount of customers with Platinum, Gold and Silver accounts
+summary(data$Account_Type)
+#We observe that the have similar values as it was highlighted in the plot above
+
+#Check the average account balance for each account type
+( average_balance <- data %>%
+  group_by(Account_Type) %>%
+  summarize(AvgBalance = mean(Avg_Account_Balance, na.rm = TRUE)) )
+#All account types have similar average account balance and thus we decided that Avg_Account_Balance is not ordinal
+```
+
+```{r}
+
+# We convert "Account_Type to a nominal variable rather than an ordinal one because we see that the classification of customers in all three accounts and the average balance that they have is virtually the same i.e. there is no significant difference in either of them.
+
+# We decide against removing this column however as we consider it to be an important factor in deciding the outcome of our model
+
+# Convert 'Account_Type' to a factor (nominal variable)
+data$Account_Type <- factor(data$Account_Type, levels = c("Platinum", "Gold", "Silver"))
+
+# Check the summary to confirm the change
+str(data$Account_Type)
+
+```
+
+```{r}
+#Apply one hot encoding for our nominal variables "Occupation", "Channel_Code" , "Account_Type" since they are all categorical variables without order
+
+# Assign column names to one_c
+one_c <- c("Occupation", "Channel_Code", "Account_Type")
+one_c <- as.factor(one_c)
+
+
+# Convert data to data.table if it's not already
+data <- as.data.table(data)
+
+# Apply one-hot encoding
+data <- one_hot(data, cols = one_c)
+```
+
+
+```{r}
+
+#The features "ID" and "Region Code" do not affect a customer's decision to buy a product. Therefore, we remove these features
+
+data$ID <- NULL
+data$Region_Code <- NULL
+
+summary(data)
+
+```
+
+```{r}
+
+# Setting seed for reproducibility
+set.seed(123)
+
+# Splitting the dataset (60% training, 40% testing)
+index <- createDataPartition(data$Target, p = 0.6, list = FALSE)
+training <- data[index,]
+test <- data[-index,]
+
+training$Target <- as.factor(training$Target)
+
+summary(training)
+summary(test)
+
+```
+
+```{r}
+
+# Check the class distribution in the target column to determine whether we have imbalanced data.
+
+prop.table(table(data$Target))
+#We observe that the number of records that belong to the class 0: customer did not purchase the product is significantly larger (85.2%) the the other class 1: customer purchased the product (14.2%). Therefore, we have imbalance data.
+
+# The way to deal with imbalanced data is to use oversampling, undersampling or using a combination of both.
+# From our paper review we found out that the data that we use to train our model can be modified to best replicate our original data to find a proper balance between "Accuracy", "Precision", "Recall" and "F1" values of our model. To do this we split the data into a middle value rather than 50-50 split.
+
+# Apply over sampling
+oversampled <- ovun.sample(Target ~ . , data = training, method = "over", p=0.35, seed=1)$data
+
+# Apply under sampling technique
+undersampled <- ovun.sample(Target ~. , data = training, method = "under", p=0.35, seed=1)$data
+
+# Apply both over and under sampling technique
+bothsampled <- ovun.sample(Target ~. , data = training, method = "both", p=0.35, seed=1)$data
+
+# Check the distribution of target variable in the oversampled, undersampled and bothsampled data
+table(oversampled$Target)
+table(undersampled$Target)
+table(bothsampled$Target)
+
+# Check the proportion of customers in the oversampled data
+prop.table(table(oversampled$Target))
+prop.table(table(undersampled$Target))
+prop.table(table(bothsampled$Target))
+
+```
+```{r}
+
+# We conclude that oversampled technique is better since it partitions the data by both adding and removing data. It attempts to preserve the quality and diversity of the dataset while allowing for more control over the final balance between classes.
+
+```
+
+## Checking which variable of our data gives the most information to our model
+```{r}
+
+# Use function information.gain to compute information gain values of the features
+weights <- information.gain(Target ~., data=bothsampled)
+
+# Add the names of the features as a new column in the weights data frame
+weights$Feature <- rownames(weights)
+
+# Order the data frame by attr_importance in descending order
+weights <- weights[order(weights$attr_importance, decreasing = TRUE), ]
+
+# Print the ordered data frame
+print(weights)
+
+```
+
+```{r}
+
+weights$attr  <- rownames(weights)
+# Let's sort the weights in decreasing order of information gain values.
+# We will use arrange() function 
+weights <- arrange(weights, -attr_importance)
+
+
+# Plot the weights
+par(mar= c(9,8,4,2)+0.1)
+barplot(weights$attr_importance, names = weights$attr, las = 2, ylim = c(0, 0.2), cex.names=0.8)
+#We observe that there are many variables with zero information gain
+
+# Filter features where the information gain is not zero
+features <- mice::filter(weights, attr_importance > 0)$attr
+
+#Let's find the attribute that have a significant higher information gain than the others
+cutoff.biggest.diff(weights)
+
+# Remove the unnecessary variables
+features <- mice::filter(weights, attr_importance > 0.001)$attr
+print(features)
+
+# Convert 'training' to a data.frame if it's not already
+bothsampled <- as.data.frame(bothsampled)
+
+# Select columns using the 'features' vector
+modellingdata <- bothsampled[, features]
+
+
+# Do not forget to add target variable
+modellingdata$Target <- bothsampled$Target
+
+```
+
+```{r}
+#We will plot the histogram of our "Target" variable and the feature with the largest information gain "Registration"
+ggplot(training, 
+      aes(x =Target, group = Registration)) + 
+      geom_bar(aes(y = after_stat(prop), fill = factor(after_stat(x))), 
+                   stat="count", 
+                   alpha = 0.7) +
+      geom_text(aes(label = scales::percent(after_stat(prop)), y = after_stat(prop) ), 
+                   stat= "count", 
+                   vjust = -.1) +
+      labs(y = "Percentage") +
+      facet_grid(~Registration) +
+      scale_fill_manual("Target" ,values = c("steelblue","lightgreen"), labels=c("No", "Yes")) + 
+      theme(plot.title = element_text(hjust = 0.5)) + 
+      ggtitle("Registration")
+
+#Customers that visited the bank for the offered product registration (Registration= 1), have a higher chance of 66% to purchase the product. On the contrary, if they didn't visited the bank, there's a percentage of 92% change that they won't buy the product.
+```
+
+```{r}
+#Age features gives the second highest information gain
+ggplot(training, aes(x = Age)) + 
+  geom_histogram(aes(color = Target, fill = Target), alpha = 0.7, position = "identity")+
+  scale_color_manual(values=c("#386cb0","black"))+
+  scale_fill_manual(values=c("#386cb0","#fdb315"))+
+  theme_classic()
+
+#Upon observation, a predominant portion of the data, irrespective of age, appears to be labeled as blue, indicating that customers did not make a purchase. Notably, within the age group of 20-49 years old, a higher number of customers are observed not to have purchased the product
+```
+
+
+## Building Models
+# 1) Random Forest Model
+```{r}
+
+set.seed(1)
+
+# Build a Random Forest model
+rf_model <- randomForest(Target ~ ., data = bothsampled, ntree = 900) # Using ntree value as 900 as more number of trees might be helpful in increasing our model statistics
+
+# Print the model summary
+print(rf_model)
+
+# Check the important attributes by using importance() function
+importance(rf_model)
+
+# Plot the importance values
+varImpPlot(rf_model)
+
+
+```
+
+# EValuating Random Forest
+```{r}
+
+# Random Forest predictions
+rf_predictions <- predict(rf_model, test)
+
+# Confusion Matrix for Random Forest
+rf_confusion <- confusionMatrix(rf_predictions, test$Target, positive = '1', mode = "prec_recall")
+print(rf_confusion)
+
+# Obtain class probabilities by using predict() and adding type = "prob" for Random Forest model_RF
+prob_RF <- predict(rf_model, test, type = "prob")
+
+```
+
+
+# 2) SVM 
+# 2.1) SVM with Information Gain
+```{r}
+
+# Build a SVM model
+svm_model_infogain <- svm(Target ~ ., data = modellingdata, kernel= "radial", scale = TRUE, probability = TRUE)
+
+# Print the model summary
+print(svm_model_infogain)
+
+```
+
+
+# Evaluating SVM with information gain
+```{r}
+
+# SVM predictions
+svm_predictions_infogain <- predict(svm_model_infogain, test, probability = TRUE)
+
+# Obtain predicted probabilities for SVM
+prob_SVM <- attr(svm_predictions_infogain, "probabilities")
+
+# Confusion Matrix for SVM
+svm_confusion_infogain <- confusionMatrix(svm_predictions_infogain, test$Target, positive = '1', mode = "prec_recall")
+
+print(svm_confusion_infogain)
+
+```
+
+# 2.2) SVM without Information Gain
+## Data sampling without information gain
+```{r}
+
+# Set random seed
+set.seed(10)
+
+# Create a sample stratified by Target and set the fraction
+data_sampled <- stratified(bothsampled, "Target", 0.25)
+
+```
+
+## SVM without information gain
+```{r}
+
+# Build a SVM model
+svm_model_woinfogain <- svm(Target ~ ., data = data_sampled, kernel= "radial", scale = TRUE, probability = TRUE)
+
+# Print the model summary
+print(svm_model_woinfogain)
+
+# SVM predictions
+svm_predictions_woinfogain <- predict(svm_model_woinfogain, test, probability = TRUE)
+
+# Confusion Matrix for SVM
+svm_confusion_woinfogain <- confusionMatrix(svm_predictions_woinfogain, test$Target, positive = '1', mode = "prec_recall")
+print(svm_confusion_woinfogain)
+
+# We found that the SVM with informaion gain outperforms the SVM without information gain.
+
+```
+
+
+# 3) LogReg
+```{r}
+
+# Build a logistic regression model assign it to LogReg
+LogReg <- glm(Target~. , bothsampled, family = "binomial")
+
+# Predict the class probabilities of the test data
+LogReg_pred <- predict(LogReg, test, type="response")
+
+head(LogReg_pred)
+
+# Check the levels of target variable
+levels(bothsampled$Target)
+
+```
+
+# Evaluating LogReg
+```{r}
+
+# Predict the class 
+LogReg_class <- ifelse(LogReg_pred > 0.5, 1, 0)
+
+# Save the predictions as factor variables
+LogReg_class <- as.factor(LogReg_class)
+
+
+# Confusion Matrix
+
+confusionMatrix(LogReg_class, test$Target, positive = "1", mode = "prec_recall")
+  
+```
+
+# 4) Decision Tree
+```{r}
+
+# Build the decision tree model
+tree_model <- C5.0(Target~ ., modellingdata)
+
+```
+
+# Evaluating Decision Tree
+```{r}
+
+# Using model to predict the class of the test data
+prediction_Tree <- predict(tree_model, test)
+
+# Obtain predicted probabilities for SVM
+prob_DT <- predict(tree_model, test, type = "prob")
+
+# Compute the confusion matrix
+confusionMatrix(prediction_Tree, test$Target, positive = "1", mode = "prec_recall")
+
+```
+
+
+## Model Tuning
+
+#Tuning RF
+# Improving Random Forestby adjusting its parameters (mtry and nodesize)
+```{r}
+
+character_columns <- sapply(bothsampled, is.character)  # Identify character columns
+# Using a loop to convert character columns to factors
+for (col in names(bothsampled)[character_columns]) {
+    bothsampled[[col]] <- as.factor(bothsampled[[col]])
+}
+
+# Separate features and target variable
+features <- bothsampled[, -ncol(bothsampled)]
+
+tuned_rf <- randomForestSRC::tune(Target~., bothsampled,
+  mtryStart = sqrt(ncol(bothsampled)),   
+  nodesizeTry = seq(1, 10, by = 2), 
+  ntree = 900,
+  stepFactor = 1.25, improve = 0.0005)
+
+# View the results to see the best hyperparameters
+tuned_rf$optimal
+
+```
+
+## Building the new RF model from the tuned format
+
+```{r}
+
+set.seed(1)
+
+# Build a Random Forest model
+rf_model_optimal <- randomForest(Target ~ ., data = bothsampled, ntree = 900, nodesize = 1, mtry = 5)
+
+# Print the model summary
+print(rf_model_optimal)
+
+# Check the important attributes by using importance() function
+importance(rf_model_optimal)
+
+# Plot the importance values
+varImpPlot(rf_model_optimal)
+
+# Optimal Random Forest predictions
+rf_optimal_predictions <- predict(rf_model_optimal, test)
+
+# Confusion Matrix for Optimal Random Forest
+rf_optimal_confusion <- confusionMatrix(rf_optimal_predictions, test$Target, positive = '1', mode = "prec_recall")
+print(rf_optimal_confusion)
+
+
+```
+
+# Tuning SVM
+## Model Tuning for SVM without information gain
+## Data sampling without information gain
+```{r}
+
+# Set random seed
+set.seed(10)
+
+# Create a sample stratified by Target and set fraction
+data_sampled_tuned <- stratified(bothsampled, "Target", 0.06)
+
+```
+
+# Improve SVM by adjusting its parameters
+```{r}
+
+# Set a seed as 1 since tune() function uses random numbers
+set.seed(1)
+
+# Find the best cost value among the list (0.1, 1, 10, 100, 1000) 
+tune_out = e1071::tune(svm, Target~., data = data_sampled_tuned, kernel= "radial", scale = TRUE, 
+                ranges = list(cost=c(0.1, 1, 10, 100, 1000)))
+
+# Save the best model as svm_best
+svm_best = tune_out$best.model
+
+```
+
+# Build the new SVM model from the tuned format
+```{r}
+
+# Predict the class of the test data 
+SVM_tunedpred <- predict(svm_best, test)
+
+# Use confusionMatrix to print the performance of SVM model
+confusionMatrix(SVM_tunedpred, test$Target, positive='1', mode = "prec_recall")
+
+```
+
+## Model Tuning for SVM with information gain
+## Data sampling with information gain
+```{r}
+
+# Set random seed
+set.seed(10)
+
+# Create a sample stratified by Target and set fraction
+data_sampled_tuned_ig <- stratified(modellingdata, "Target", 0.06)
+
+```
+
+# Improve SVM by adjusting its parameters
+```{r}
+
+# Set a seed as 1 since tune() function uses random numbers
+set.seed(1)
+
+# Find the best cost value among the list (0.1, 1, 10, 100, 1000) 
+tune_out = e1071::tune(svm, Target~., data = data_sampled_tuned_ig, kernel= "radial", scale = TRUE, 
+                ranges = list(cost=c(0.1, 1, 10, 100, 1000)))
+
+# Save the best model as svm_best
+svm_best_ig = tune_out$best.model
+
+```
+
+# Build the new SVM model from the tuned format
+```{r}
+
+# Predict the class of the test data 
+SVM_tunedpred_ig <- predict(svm_best_ig, test)
+
+# Use confusionMatrix to print the performance of SVM model
+confusionMatrix(SVM_tunedpred_ig, test$Target, positive='1', mode = "prec_recall")
+
+```
+
+# Tuning DT
+# Improving Decisionn Tree by adjusting its parameters
+# Default decision tree paramaeters: minsplit = 20, minbucket = 5, maxdepth=20
+```{r}
+
+library(rpart)
+
+control <- rpart.control(minsplit=20, minbucket=5, maxdepth=20)
+
+tree_tuned <- rpart(Target ~ ., data = undersampled, method="class", control=control)
+
+predictions_tree_tuned <- predict(tree_tuned, test, type = "class")
+
+confusionMatrix(predictions_tree_tuned, test$Target, positive = "1", mode = "prec_recall")
+
+```
+
+### Since there is no significant improvement after tuning we decide to use the original model
+
+## Advanced Model Evaluation
+# ROC Curve
+```{r}
+
+# Use roc function to return some performance metrics
+ROC_SVM <- roc(test$Target, prob_SVM[,2])
+ROC_RF <- roc(test$Target, prob_RF[,2])
+ROC_LogReg <- roc(test$Target, LogReg_pred)
+ROC_DT <- roc(test$Target, prob_DT[,2])
+
+# Plot the ROC curve for Logistic Regression, SVM, Random Forest and Decision Tree
+pROC::ggroc(list(LogReg = ROC_LogReg, SVM = ROC_SVM, RF = ROC_RF, DT = ROC_DT), legacy.axes=TRUE, size = 1)+ xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed", size = 1) + labs(caption = "ROC") +
+  theme_minimal() 
+
+#Calculate the area under the curve (AUC) for Logistic Regression 
+auc(ROC_LogReg)
+
+#Calculate the area under the curve (AUC) for SVM 
+auc(ROC_SVM)
+
+#Calculate the area under the curve (AUC) for Random Forest 
+auc(ROC_RF)
+
+#Calculate the area under the curve (AUC) for Decision Tree
+auc(ROC_DT)
+
+```
+
+
+## Gain Chart
+```{r}
+
+# Create a Gain Chart
+gain_data <- coords(ROC_RF, "all")
+
+cumulative_gains <- cumsum(gain_data$TPR) / sum(gain_data$TPR)
+
+GainTable_RF <- cumGainsTable(prob_RF[,2], test$Target, resolution = 1/100)
+
+# Plot the Gain Chart
+plot(GainTable_RF[,4], col="red", type="l",    
+xlab="Percentage of datasets", ylab="Percentage of events", lwd = 2) +
+grid(NULL, lwd = 1) + title("Gain Chart for RF")
+
+# Add a reference line for random model
+abline(a = 0, b = 1, col = "grey", lty = 2, lwd = 2)
+
+# Add a legend
+legend("bottomright", legend = c("% of cumulative event (model)", "% of cumulative event (random)"),
+       col = c("red", "grey"), lty = c(1,2))
+
+
+```
+
+
+
+### After carefully looking at all the resuls from SVM, LogReg, Decision Tree and Random Forest we chose Random Forest as the model to go with since it provides statistically better results while at the same time uses less time to run and is easier to work with compared to every other model
+
+
+
