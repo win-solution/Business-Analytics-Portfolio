@@ -1,0 +1,3092 @@
+---
+title: "Dissertation"
+author: '5504970'
+date: "2024-07-18"
+output:
+  word_document: default
+  html_document: default
+---
+
+options(error = recover)
+# Library Setup
+```{r message=FALSE, warning=FALSE, include=FALSE}
+options(error = recover)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(fitdistrplus)
+library(writexl)
+library(caret)
+library(randomForest)
+library(e1071)
+library(Metrics)
+library(ROSE)
+library(FSelector)
+library(Benchmarking)
+library(pROC)
+library(randomForest)
+library(gbm)
+library(glmnet)
+library(FSelectorRcpp)
+library(infotheo)
+library(forecast)
+library(tseries)
+library(lubridate)
+library(reshape2)
+library(gridExtra)
+library(grid) 
+library(knitr) 
+library(kableExtra)
+library(webshot)
+library(ggpubr)
+library(parallel)
+library(foreach)
+library(data.table)
+library(tidyverse)
+library(caTools)
+library(tidyr)
+library(mgcv)
+library(ggcorrplot)
+```
+
+
+# Read the Dataset File
+```{r message=FALSE, warning=FALSE}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Read the Excel dataset
+data <- read_excel("BYD Dealership Data.xlsx", sheet = "Sheet1")
+```
+
+
+# Pre-processing
+```{r message=FALSE, warning=FALSE}
+# Clean column names by removing leading/trailing whitespace
+colnames(data) <- trimws(colnames(data))
+
+# Print the first few rows of the dataset to understand its structure
+print(head(data))
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Check for missing values
+missing_values <- colSums(is.na(data))
+missing_values_table <- data.frame(Column = names(missing_values), Missing_Values = missing_values)
+
+# Print the table
+print(missing_values_table)
+
+# Save the table to Excel
+write_xlsx(missing_values_table, "Missing Values.xlsx")
+
+# Handle missing values by mean imputation (for numeric columns)
+data <- data %>%
+  mutate(`Monthly_Sales_Volume_per_Country` = ifelse(is.na(`Monthly_Sales_Volume_per_Country`),
+                                                             mean(`Monthly_Sales_Volume_per_Country`, na.rm = TRUE),
+                                                             `Monthly_Sales_Volume_per_Country`))
+```
+
+
+```{r}
+# Verify that there are no missing values left
+missing_values_after <- colSums(is.na(data))
+print(missing_values_after)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Calculate outliers based on the IQR method
+Q1 <- quantile(data$Monthly_Sales_Volume_per_Country, 0.25)
+Q3 <- quantile(data$Monthly_Sales_Volume_per_Country, 0.75)
+IQR_value <- Q3 - Q1
+
+# Define the lower and upper bounds for outliers
+lower_bound <- Q1 - 1.5 * IQR_value
+upper_bound <- Q3 + 1.5 * IQR_value
+
+# Identify the outliers
+outliers <- data[data$Monthly_Sales_Volume_per_Country < lower_bound | data$Monthly_Sales_Volume_per_Country > upper_bound, ]
+
+# Check which countries and regions have outlier sales volumes
+outlier_info <- outliers[, c("Country", "Region", "Monthly_Sales_Volume_per_Country")]
+
+# Print the outlier information
+print(outlier_info)
+
+# Create the boxplot for outlier identification
+boxplot_outliers <- ggplot(data, aes(x = Country, y = `Monthly_Sales_Volume_per_Country`)) +
+  geom_boxplot() +
+  ggtitle('Boxplot for Monthly Sales Volume per Country with Outliers') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))  # Rotate x-axis labels for readability
+
+print(boxplot_outliers)
+
+# Save the boxplot to an image file
+ggsave("Boxplot Outliers.png", plot = boxplot_outliers, device = "png", width = 12, height = 8)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Fit a normal distribution to the sales volume per country data
+sales_volume <- data$`Monthly_Sales_Volume_per_Country`
+fit <- fitdist(sales_volume, "norm")
+mu <- fit$estimate['mean']
+sigma <- fit$estimate['sd']
+
+# Generate synthetic sales volume per Dealer
+set.seed(42)  # for reproducibility
+synthetic_country_sales <- rnorm(length(sales_volume), mean = mu, sd = sigma)
+synthetic_country_sales <- pmax(round(synthetic_country_sales), 0)  # Ensure non-negative integer values
+
+# Ensure synthetic data adds up exactly and is non-negative
+data <- data %>%
+  group_by(Country, Year, Month) %>%
+  mutate(
+    synthetic_country_sales = synthetic_country_sales[match(paste(Country, Year, Month), 
+                                                            paste(data$Country, data$Year, data$Month))],
+    proportional_sales = `Monthly_Sales_Volume_per_Country` * Number_of_Outlets / sum(Number_of_Outlets),
+    Monthly_Sales_Volume_per_Dealer = floor(proportional_sales),
+    remaining_adjustment = `Monthly_Sales_Volume_per_Country` - sum(Monthly_Sales_Volume_per_Dealer),
+    adjustment = ifelse(row_number() <= remaining_adjustment, 1, 0),
+    Monthly_Sales_Volume_per_Dealer = pmax(Monthly_Sales_Volume_per_Dealer + adjustment, 0)
+  ) %>%
+  ungroup()
+
+# Remove unnecessary columns by setting them to NULL
+data <- data %>%
+  mutate(synthetic_country_sales = NULL,
+         proportional_sales = NULL,
+         remaining_adjustment = NULL,
+         adjustment = NULL)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Generate Number_of_Salespeople using proportional scaling and number of outlets
+# Assume a base of 2 salespeople per outlet and scale proportionally with sales volume
+base_salespeople_per_outlet <- 2
+units_per_salesperson <- 20
+data <- data %>%
+  mutate(Number_of_Salespeople = ceiling((Monthly_Sales_Volume_per_Dealer / units_per_salesperson) + 
+                                         (Number_of_Outlets * base_salespeople_per_outlet)))
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Generate Service_Completion_Time using a Weibull distribution
+# Assume shape parameter k = 1.5, scale parameter lambda = 25 (adjust these values based on insights)
+shape_param <- 1.5  # Shape parameter
+scale_param <- 2  # Scale parameter (assuming average service time around 2 hours)
+
+# Generate Service_Completion_Time using a Weibull distribution in hours and round to 2 decimal places
+data <- data %>%
+  mutate(Service_Completion_Time = round(rweibull(n = n(), shape = shape_param, scale = scale_param), 2))
+```
+
+
+```{r}
+# Generate synthetic NPS using multiple factors including the generated Service_Completion_Time
+# Weights are arbitrary and should be adjusted based on actual data/insights
+# Adjust the weights to reflect a more realistic distribution of NPS scores
+data <- data %>%
+  mutate(NPS_Score = pmin(5.0 +  # The baseline mean
+                          0.002 * Monthly_Sales_Volume_per_Dealer - 
+                          0.1 * Service_Completion_Time + 
+                          0.01 * Local_Economic_Growth + 
+                          0.01 * Cultural_Difference_Score + 
+                          0.015 * Regulatory_Environment_Score + 
+                          rnorm(n(), mean = 0, sd = 1), 7.7))  # Adjust variability
+
+# Ensure NPS_Score is within 0-10 range and round to 2 decimal places
+data <- data %>%
+  mutate(NPS_Score = round(pmax(pmin(NPS_Score, 7.7), 0), 2))
+```
+
+
+```{r}
+# Write the synthetic data to a new Excel file
+output_file_path <- "BYD_Dealership_Data_Complete.xlsx"
+write_xlsx(data, output_file_path)
+```
+
+
+# Pre-analysis
+
+## Trend Analysis
+```{r}
+# Convert Month column to numeric format if it contains month names
+data <- data %>%
+  mutate(Month = match(Month, month.name))
+
+# Create a Date column from Year and Month
+data <- data %>%
+  mutate(Date = as.Date(paste(Year, Month, "01", sep = "-")))
+
+# Plotting trends over time for Monthly Sales Volume per Country
+trend_sales <- ggplot(data, aes(x = Date, y = `Monthly_Sales_Volume_per_Country`)) +
+  geom_line() +
+  facet_wrap(~ Country, scales = "free_y") +
+  ggtitle('Trend of Monthly Sales Volume per Country over Time') +
+  xlab('Time') +
+  ylab('Monthly Sales Volume per Country') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(trend_sales)
+
+# Save the trend plot to an image file
+ggsave("Trend Monthly Sales Volume.png", plot = trend_sales, device = "png")
+
+# Plotting trends over time for NPS Scores
+trend_nps_facet <- ggplot(data, aes(x = Date, y = NPS_Score)) +
+  geom_line(aes(group = Dealership_Name), alpha = 0.5) +
+  geom_smooth(se = FALSE, method = "loess", color = "blue") +
+  facet_wrap(~ Country, scales = "free_y") +
+  ggtitle('Trend of NPS over Time by Country') +
+  xlab('Time') +
+  ylab('NPS Score') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10, face = "bold"))
+
+print(trend_nps_facet)
+
+# Save the trend plot to an image file with a white background
+ggsave("Trend NPS.png", plot = trend_nps_facet, device = "png", bg = "white")
+```
+
+
+## Movement Analysis
+```{r message=FALSE}
+# Plotting movement over time for Service Completion Time
+movement_service_time <- ggplot(data, aes(x = Date, y = Service_Completion_Time)) +
+  geom_point(alpha = 0.6, size = 1) +  # Increase point size for better visibility
+  geom_line(aes(group = Dealership_Name), alpha = 0.5) +
+  geom_smooth(se = FALSE, method = "loess", color = "blue") +
+  facet_wrap(~ Country, scales = "free_y") +
+  ggtitle('Movement of Service Completion Time over Time by Country') +
+  xlab('Time') +
+  ylab('Service Completion Time (hours)') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10, face = "bold"))
+
+print(movement_service_time)
+
+# Save the movement plot to an image file with a white background
+ggsave("Movement Service Completion Time.png", plot = movement_service_time, device = "png", bg = "white")
+
+# Plotting movement over time for Number of Salespeople
+movement_salespeople <- ggplot(data, aes(x = Date, y = Number_of_Salespeople)) +
+  geom_point(alpha = 0.6, size = 1) +  # Increase point size for better visibility
+  geom_line(aes(group = Dealership_Name), alpha = 0.5) +
+  geom_smooth(se = FALSE, method = "loess", color = "blue") +
+  facet_wrap(~ Country, scales = "free_y") +
+  ggtitle('Movement of Number of Salespeople over Time by Country') +
+  xlab('Time') +
+  ylab('Number of Salespeople') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10, face = "bold"))
+
+print(movement_salespeople)
+
+# Save the movement plot to an image file with a white background
+ggsave("Movement Number of Salespeople.png", plot = movement_salespeople, device = "png", bg = "white")
+```
+
+
+## Comparison Plots
+```{r}
+# Bar plot for aggregate Monthly Sales Volume per Dealer by Region
+agg_sales_region <- data %>%
+  group_by(Region) %>%
+  summarize(Aggregate_Sales = mean(Monthly_Sales_Volume_per_Dealer, na.rm = TRUE)) %>%
+  arrange(desc(Aggregate_Sales))
+
+bar_sales_region <- ggplot(agg_sales_region, aes(x = reorder(Region, Aggregate_Sales), y = Aggregate_Sales)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +
+  ggtitle('Average Monthly Sales Volume per Dealer by Region') +
+  xlab('Region') +
+  ylab('Average Monthly Sales Volume per Dealer') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8),
+        axis.text.y = element_text(size = 8),
+        plot.title = element_text(hjust = 0.5))
+
+print(bar_sales_region)
+
+# Save the bar plot to an image file
+ggsave("Bar Sales Volume by Region.png", plot = bar_sales_region, device = "png", bg = "white", width = 10, height = 12)
+
+# Bar plot for aggregate NPS Scores by Dealership
+agg_nps_dealership <- data %>%
+  group_by(Dealership_Name) %>%
+  summarize(Aggregate_NPS = mean(NPS_Score, na.rm = TRUE)) %>%
+  arrange(desc(Aggregate_NPS))
+
+bar_nps_dealership <- ggplot(agg_nps_dealership, aes(x = reorder(Dealership_Name, Aggregate_NPS), y = Aggregate_NPS)) +
+  geom_bar(stat = "identity", fill = "lightgreen") +
+  coord_flip() +
+  ggtitle('Average NPS by Dealership') +
+  xlab('Dealership Name') +
+  ylab('Average NPS') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8),
+        axis.text.y = element_text(size = 8),
+        plot.title = element_text(hjust = 0.5))
+
+print(bar_nps_dealership)
+
+# Save the bar plot to an image file
+ggsave("Bar NPS by Dealership.png", plot = bar_nps_dealership, device = "png", bg = "white", width = 10, height = 12)
+```
+
+
+# Efficiency Analysis using DEA
+```{r message=FALSE, warning=FALSE}
+# Convert data to data.table for faster operations
+data <- as.data.table(data)
+
+# Ensure relevant columns are numeric
+data[, `:=`(Number_of_Salespeople = as.numeric(Number_of_Salespeople),
+            Number_of_Outlets = as.numeric(Number_of_Outlets),
+            Local_Economic_Growth = as.numeric(Local_Economic_Growth),
+            Regional_Population_Density = as.numeric(Regional_Population_Density),
+            Service_Completion_Time = as.numeric(Service_Completion_Time),
+            Monthly_Sales_Volume_per_Dealer = as.numeric(Monthly_Sales_Volume_per_Dealer),
+            NPS_Score = as.numeric(NPS_Score),
+            Monthly_Sales_Volume_per_Country = as.numeric(Monthly_Sales_Volume_per_Country))]
+
+# Normalize data (optional, helps in better discrimination)
+normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+# Normalize inputs and outputs
+data_normalized <- data[, .(
+  Number_of_Salespeople = normalize(Number_of_Salespeople),
+  Number_of_Outlets = normalize(Number_of_Outlets),
+  Local_Economic_Growth = normalize(Local_Economic_Growth),
+  Regional_Population_Density = normalize(Regional_Population_Density),
+  Service_Completion_Time = normalize(Service_Completion_Time),
+  Monthly_Sales_Volume_per_Dealer = normalize(Monthly_Sales_Volume_per_Dealer),
+  NPS_Score = normalize(NPS_Score),
+  Monthly_Sales_Volume_per_Country = normalize(Monthly_Sales_Volume_per_Country)
+)]
+
+# Define inputs and outputs for DEA using normalized data
+inputs <- as.matrix(data_normalized[, .(Number_of_Salespeople, Number_of_Outlets, 
+                                        Local_Economic_Growth, Regional_Population_Density, 
+                                        Service_Completion_Time)])
+outputs <- as.matrix(data_normalized[, .(Monthly_Sales_Volume_per_Dealer, NPS_Score, 
+                                         Monthly_Sales_Volume_per_Country)])
+
+# Perform DEA analysis using CRS model for simplicity
+dea_model <- dea(inputs, outputs, RTS = "crs", ORIENTATION = "in")
+
+# Extract DEA efficiency scores
+data[, DEA_Efficiency := dea_model$eff]
+data <- as.data.frame(data)
+
+# Plot 1: Distribution of DEA Efficiency Scores with White Background
+dea_efficiency_plot <- ggplot(data, aes(x = DEA_Efficiency)) +
+  geom_histogram(binwidth = 0.05, fill = "blue", color = "white", alpha = 0.7) +
+  ggtitle("Distribution of DEA Efficiency Scores (Pre-Modelling)") +
+  xlab("DEA Efficiency Score") +
+  ylab("Frequency") +
+  theme_minimal() +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white", color = "white"),
+    panel.grid = element_line(color = "gray90"),
+    plot.title = element_text(color = "black", size = 14, face = "bold"),
+    axis.title.x = element_text(color = "black", size = 12),
+    axis.title.y = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black")
+  )
+
+# Display the plot
+print(dea_efficiency_plot)
+
+# Save the plot as an image file with a white background
+ggsave("DEA Efficiency Distribution Pre-Modelling.png", plot = dea_efficiency_plot, device = "png", bg = "white")
+
+# Plot 2: Average DEA Efficiency by Country with White Background
+# Aggregate average DEA Efficiency by Country
+dea_efficiency_by_country <- data %>%
+  group_by(Country) %>%
+  summarize(Average_DEA_Efficiency = mean(DEA_Efficiency, na.rm = TRUE))
+
+# Create a bar plot of average DEA Efficiency by Country
+dea_efficiency_country_plot <- ggplot(dea_efficiency_by_country, aes(x = reorder(Country, Average_DEA_Efficiency), y = Average_DEA_Efficiency)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +
+  ggtitle("Average DEA Efficiency by Country (Pre-Modelling)") +
+  xlab("Country") +
+  ylab("Average DEA Efficiency Score") +
+  theme_minimal() +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white", color = "white"),
+    panel.grid = element_line(color = "gray90"),
+    plot.title = element_text(color = "black", size = 14, face = "bold"),
+    axis.title.x = element_text(color = "black", size = 12),
+    axis.title.y = element_text(color = "black", size = 12),
+    axis.text = element_text(color = "black")
+  )
+
+# Display the plot
+print(dea_efficiency_country_plot)
+
+# Save the plot as an image file with a white background
+ggsave("DEA Efficiency by Country Pre-Modelling.png", plot = dea_efficiency_country_plot, device = "png", bg = "white")
+```
+
+
+# Predictive Modelling Preparation
+```{r message=FALSE, warning=FALSE}
+# Engineer new features if necessary (Feature Engineering)
+data <- data %>%
+  mutate(Interaction_Term = Number_of_Salespeople * Number_of_Outlets,
+         Polynomial_Term = I(Number_of_Salespeople^2))
+
+# Display the first few rows to confirm changes
+head(data)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Create a single partition index for the training and test split
+train_index <- createDataPartition(data$Monthly_Sales_Volume_per_Dealer, p = 0.8, list = FALSE)
+
+# Split the dataset into training and test sets using the same index
+train_data_sales <- data[train_index, ]
+test_data_sales <- data[-train_index, ]
+
+# Since 'data' contains all necessary columns, use the same index for NPS and efficiency
+train_data_nps <- data[train_index, ]  # No need to separate as data is the same
+test_data_nps <- data[-train_index, ]  # No need to separate as data is the same
+
+train_data_efficiency <- data[train_index, ]  # No need to separate as data is the same
+test_data_efficiency <- data[-train_index, ]  # No need to separate as data is the same
+
+# Verify that the dimensions are consistent
+cat("Train Data Sales Dimensions:", dim(train_data_sales), "\n")
+cat("Test Data Sales Dimensions:", dim(test_data_sales), "\n")
+cat("Train Data NPS Dimensions:", dim(train_data_nps), "\n")
+cat("Test Data NPS Dimensions:", dim(test_data_nps), "\n")
+cat("Train Data Efficiency Dimensions:", dim(train_data_efficiency), "\n")
+cat("Test Data Efficiency Dimensions:", dim(test_data_efficiency), "\n")
+
+# Validate that the train and test data have consistent sizes
+stopifnot(
+  nrow(train_data_sales) == nrow(train_data_nps),
+  nrow(test_data_sales) == nrow(test_data_nps),
+  nrow(train_data_sales) == nrow(train_data_efficiency),
+  nrow(test_data_sales) == nrow(test_data_efficiency)
+)
+```
+
+
+# Predictive Modelling: Linear Regression
+```{r}
+# Feature selection using information gain for each target
+
+# For Monthly Sales Volume per Dealer
+weights_sales <- information.gain(Monthly_Sales_Volume_per_Dealer ~ ., data = train_data_sales)
+weights_sales$Feature <- rownames(weights_sales)
+weights_sales <- weights_sales[order(weights_sales$attr_importance, decreasing = TRUE), ]
+
+# For NPS Score
+weights_nps <- information.gain(NPS_Score ~ ., data = train_data_nps)
+weights_nps$Feature <- rownames(weights_nps)
+weights_nps <- weights_nps[order(weights_nps$attr_importance, decreasing = TRUE), ]
+
+# For DEA Efficiency
+weights_efficiency <- information.gain(DEA_Efficiency ~ ., data = train_data_efficiency)
+weights_efficiency$Feature <- rownames(weights_efficiency)
+weights_efficiency <- weights_efficiency[order(weights_efficiency$attr_importance, decreasing = TRUE), ]
+
+# Filter features with significant information gain
+
+# For Monthly Sales Volume per Dealer
+significant_features_sales <- filter(weights_sales, attr_importance > 0.001)$Feature
+modeling_data_sales <- train_data_sales[, significant_features_sales, drop = FALSE]
+modeling_data_sales$Monthly_Sales_Volume_per_Dealer <- train_data_sales$Monthly_Sales_Volume_per_Dealer
+
+# For NPS Score
+significant_features_nps <- filter(weights_nps, attr_importance > 0.001)$Feature
+modeling_data_nps <- train_data_nps[, significant_features_nps, drop = FALSE]
+modeling_data_nps$NPS_Score <- train_data_nps$NPS_Score
+
+# For DEA Efficiency
+significant_features_efficiency <- filter(weights_efficiency, attr_importance > 0.001)$Feature
+modeling_data_efficiency <- train_data_efficiency[, significant_features_efficiency, drop = FALSE]
+modeling_data_efficiency$DEA_Efficiency <- train_data_efficiency$DEA_Efficiency
+
+# Print out the significant features for each model
+cat("Significant Features for Sales Volume:\n")
+print(significant_features_sales)
+
+cat("\nSignificant Features for NPS Score:\n")
+print(significant_features_nps)
+
+cat("\nSignificant Features for DEA Efficiency:\n")
+print(significant_features_efficiency)
+```
+
+
+```{r message=TRUE, warning=FALSE}
+# Define hyperparameter grid for tuning
+tune_grid <- expand.grid(.alpha = seq(0, 1, length = 10), .lambda = seq(0.0001, 0.1, length = 10))
+
+# K-fold Cross-Validation
+control <- trainControl(method = "cv", number = 10)
+```
+
+
+## Linear Regression for Sales Volume
+```{r message=FALSE, warning=FALSE}
+# Hyperparameter tuning for Sales Volume
+model_sales_tuned <- train(Monthly_Sales_Volume_per_Dealer ~ ., data = modeling_data_sales, method = "glmnet", tuneGrid = tune_grid, trControl = control)
+print(model_sales_tuned)
+
+# Make predictions on the test set using the tuned model
+pred_sales_tuned <- predict(model_sales_tuned, test_data_sales)
+
+# Evaluate the tuned model using MAE and RMSE
+train_mae_sales_tuned <- mae(train_data_sales$Monthly_Sales_Volume_per_Dealer, predict(model_sales_tuned, train_data_sales))
+test_mae_sales_tuned <- mae(test_data_sales$Monthly_Sales_Volume_per_Dealer, pred_sales_tuned)
+train_rmse_sales_tuned <- rmse(train_data_sales$Monthly_Sales_Volume_per_Dealer, predict(model_sales_tuned, train_data_sales))
+test_rmse_sales_tuned <- rmse(test_data_sales$Monthly_Sales_Volume_per_Dealer, pred_sales_tuned)
+
+print(paste("Train MAE Sales (Tuned): ", train_mae_sales_tuned))
+print(paste("Test MAE Sales (Tuned): ", test_mae_sales_tuned))
+print(paste("Train RMSE Sales (Tuned): ", train_rmse_sales_tuned))
+print(paste("Test RMSE Sales (Tuned): ", test_rmse_sales_tuned))
+
+# Contextualization of MAE and RMSE for Sales Volume
+mean_sales <- mean(test_data_sales$Monthly_Sales_Volume_per_Dealer)
+train_mae_sales_pct_tuned <- (train_mae_sales_tuned / mean_sales) * 100
+test_mae_sales_pct_tuned <- (test_mae_sales_tuned / mean_sales) * 100
+train_rmse_sales_pct_tuned <- (train_rmse_sales_tuned / mean_sales) * 100
+test_rmse_sales_pct_tuned <- (test_rmse_sales_tuned / mean_sales) * 100
+
+print(paste("Train MAE as a percentage of Mean Sales (Tuned): ", train_mae_sales_pct_tuned))
+print(paste("Test MAE as a percentage of Mean Sales (Tuned): ", test_mae_sales_pct_tuned))
+print(paste("Train RMSE as a percentage of Mean Sales (Tuned): ", train_rmse_sales_pct_tuned))
+print(paste("Test RMSE as a percentage of Mean Sales (Tuned): ", test_rmse_sales_pct_tuned))
+
+# Visualization for Sales Volume Prediction
+results_sales_tuned <- data.frame(Actual = test_data_sales$Monthly_Sales_Volume_per_Dealer, Predicted = pred_sales_tuned)
+plot_sales <- ggplot(results_sales_tuned, aes(x = Actual, y = Predicted)) +
+  geom_point(color = 'blue', alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = 'red', linetype = 'dashed') +
+  ggtitle('Monthly Sales Volume Per Dealer: Actual vs Predicted (Linear Regression)') +
+  xlab('Actual Sales Volume') +
+  ylab('Predicted Sales Volume') +
+  theme_minimal(base_family = "Arial", base_size = 14) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    legend.background = element_rect(fill = "white"),
+    legend.key = element_rect(fill = "white"),
+    strip.background = element_rect(fill = "white")
+  )
+print(plot_sales)
+
+# Save Sales Volume plot
+ggsave("Sales Volume Prediction LR.png", plot = plot_sales, width = 10, height = 6)
+```
+
+
+## Linear Regression for NPS
+```{r message=FALSE, warning=FALSE}
+# Hyperparameter tuning for NPS
+model_nps_tuned <- train(NPS_Score ~ ., data = modeling_data_nps, method = "glmnet", tuneGrid = tune_grid, trControl = control)
+print(model_nps_tuned)
+
+# Make predictions on the test set using the tuned model
+pred_nps_tuned <- predict(model_nps_tuned, test_data_nps)
+
+# Evaluate the tuned model using MAE and RMSE
+train_mae_nps_tuned <- mae(train_data_nps$NPS_Score, predict(model_nps_tuned, train_data_nps))
+test_mae_nps_tuned <- mae(test_data_nps$NPS_Score, pred_nps_tuned)
+train_rmse_nps_tuned <- rmse(train_data_nps$NPS_Score, predict(model_nps_tuned, train_data_nps))
+test_rmse_nps_tuned <- rmse(test_data_nps$NPS_Score, pred_nps_tuned)
+
+print(paste("Train MAE NPS (Tuned): ", train_mae_nps_tuned))
+print(paste("Test MAE NPS (Tuned): ", test_mae_nps_tuned))
+print(paste("Train RMSE NPS (Tuned): ", train_rmse_nps_tuned))
+print(paste("Test RMSE NPS (Tuned): ", test_rmse_nps_tuned))
+
+# Contextualization of MAE and RMSE for NPS
+mean_nps <- mean(test_data_nps$NPS_Score)
+train_mae_nps_pct_tuned <- (train_mae_nps_tuned / mean_nps) * 100
+test_mae_nps_pct_tuned <- (test_mae_nps_tuned / mean_nps) * 100
+train_rmse_nps_pct_tuned <- (train_rmse_nps_tuned / mean_nps) * 100
+test_rmse_nps_pct_tuned <- (test_rmse_nps_tuned / mean_nps) * 100
+
+print(paste("Train MAE as a percentage of Mean NPS (Tuned): ", train_mae_nps_pct_tuned))
+print(paste("Test MAE as a percentage of Mean NPS (Tuned): ", test_mae_nps_pct_tuned))
+print(paste("Train RMSE as a percentage of Mean NPS (Tuned): ", train_rmse_nps_pct_tuned))
+print(paste("Test RMSE as a percentage of Mean NPS (Tuned): ", test_rmse_nps_pct_tuned))
+
+# Visualization for NPS Prediction
+results_nps_tuned <- data.frame(Actual = test_data_nps$NPS_Score, Predicted = pred_nps_tuned)
+plot_nps <- ggplot(results_nps_tuned, aes(x = Actual, y = Predicted)) +
+  geom_point(color = 'blue', alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = 'red', linetype = 'dashed') +
+  ggtitle('NPS: Actual vs Predicted (Linear Regression)') +
+  xlab('Actual NPS') +
+  ylab('Predicted NPS') +
+  theme_minimal(base_family = "Arial", base_size = 14) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    legend.background = element_rect(fill = "white"),
+    legend.key = element_rect(fill = "white"),
+    strip.background = element_rect(fill = "white")
+  )
+print(plot_nps)
+
+# Save NPS plot
+ggsave("NPS Prediction LR.png", plot = plot_nps, width = 10, height = 6)
+```
+
+
+## Linear Regression for Efficiency
+```{r message=FALSE, warning=FALSE}
+# Hyperparameter tuning for Efficiency
+model_efficiency_tuned <- train(DEA_Efficiency ~ ., data = modeling_data_efficiency, method = "glmnet", tuneGrid = tune_grid, trControl = control)
+print(model_efficiency_tuned)
+
+# Make predictions on the test set using the tuned model
+pred_efficiency_tuned <- predict(model_efficiency_tuned, test_data_efficiency)
+
+# Evaluate the tuned model using MAE and RMSE
+train_mae_efficiency_tuned <- mae(train_data_efficiency$DEA_Efficiency, predict(model_efficiency_tuned, train_data_efficiency))
+test_mae_efficiency_tuned <- mae(test_data_efficiency$DEA_Efficiency, pred_efficiency_tuned)
+train_rmse_efficiency_tuned <- rmse(train_data_efficiency$DEA_Efficiency, predict(model_efficiency_tuned, train_data_efficiency))
+test_rmse_efficiency_tuned <- rmse(test_data_efficiency$DEA_Efficiency, pred_efficiency_tuned)
+
+print(paste("Train MAE Efficiency (Tuned): ", train_mae_efficiency_tuned))
+print(paste("Test MAE Efficiency (Tuned): ", test_mae_efficiency_tuned))
+print(paste("Train RMSE Efficiency (Tuned): ", train_rmse_efficiency_tuned))
+print(paste("Test RMSE Efficiency (Tuned): ", test_rmse_efficiency_tuned))
+
+# Contextualization of MAE and RMSE for Efficiency
+mean_efficiency <- mean(test_data_efficiency$DEA_Efficiency)
+train_mae_efficiency_pct_tuned <- (train_mae_efficiency_tuned / mean_efficiency) * 100
+test_mae_efficiency_pct_tuned <- (test_mae_efficiency_tuned / mean_efficiency) * 100
+train_rmse_efficiency_pct_tuned <- (train_rmse_efficiency_tuned / mean_efficiency) * 100
+test_rmse_efficiency_pct_tuned <- (test_rmse_efficiency_tuned / mean_efficiency) * 100
+
+print(paste("Train MAE as a percentage of Mean Efficiency (Tuned): ", train_mae_efficiency_pct_tuned))
+print(paste("Test MAE as a percentage of Mean Efficiency (Tuned): ", test_mae_efficiency_pct_tuned))
+print(paste("Train RMSE as a percentage of Mean Efficiency (Tuned): ", train_rmse_efficiency_pct_tuned))
+print(paste("Test RMSE as a percentage of Mean Efficiency (Tuned): ", test_rmse_efficiency_pct_tuned))
+
+# Visualization for Efficiency Prediction
+results_efficiency_tuned <- data.frame(Actual = test_data_efficiency$DEA_Efficiency, Predicted = pred_efficiency_tuned)
+plot_efficiency <- ggplot(results_efficiency_tuned, aes(x = Actual, y = Predicted)) +
+  geom_point(color = 'blue', alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = 'red', linetype = 'dashed') +
+  ggtitle('DEA Efficiency Scores: Actual vs Predicted (Linear Regression)') +
+  xlab('Actual Efficiency') +
+  ylab('Predicted Efficiency') +
+  theme_minimal(base_family = "Arial", base_size = 14) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    legend.background = element_rect(fill = "white"),
+    legend.key = element_rect(fill = "white"),
+    strip.background = element_rect(fill = "white")
+  )
+print(plot_efficiency)
+
+# Save Efficiency plot
+ggsave("Efficiency Prediction LR.png", plot = plot_efficiency, width = 10, height = 6)
+```
+
+
+# Predictive Modelling: Random Forest
+
+## Random Forest for Sales Volume
+```{r message=FALSE, warning=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Feature Selection using Random Forest for Sales Volume Prediction
+# Build a preliminary Random Forest model for Sales Volume
+rf_model_prel_sales <- randomForest(Monthly_Sales_Volume_per_Dealer ~ ., data = train_data_sales, ntree = 100, importance = TRUE)
+
+# Get variable importance for Sales Volume
+var_importance_sales <- importance(rf_model_prel_sales)
+
+# Create a data frame with feature importance for Sales Volume
+importance_df_sales <- data.frame(Feature = rownames(var_importance_sales), Importance = var_importance_sales[, "IncNodePurity"])
+
+# Filter features with significant importance for Sales Volume
+significant_features_rf_sales <- importance_df_sales %>%
+  filter(Importance > quantile(Importance, 0.25)) %>%  # Retain top 75% important features
+  pull(Feature)
+
+# Select columns using the significant features vector for Sales Volume
+modeling_data_sales_rf <- train_data_sales[, significant_features_rf_sales, drop = FALSE]
+
+# Add the target variable back to the modeling data
+modeling_data_sales_rf$Monthly_Sales_Volume_per_Dealer <- train_data_sales$Monthly_Sales_Volume_per_Dealer
+
+# Print the selected features for modeling
+print("Selected Features for Sales Volume Prediction:")
+print(significant_features_rf_sales)
+
+# Define a hyperparameter grid for tuning only mtry
+tune_grid_rf_sales <- expand.grid(
+  mtry = seq(2, length(significant_features_rf_sales), by = 2) # Use length(significant_features_rf_sales) to dynamically adapt to number of features
+)
+
+# K-fold Cross-Validation setup
+control_rf_sales <- trainControl(method = "cv", number = 10)
+
+# Train Random Forest model with hyperparameter tuning for sales volume
+rf_model_tuned_sales <- train(
+  Monthly_Sales_Volume_per_Dealer ~ .,
+  data = modeling_data_sales_rf,
+  method = "rf",
+  tuneGrid = tune_grid_rf_sales,
+  trControl = control_rf_sales,
+  ntree = 200,  # Set ntree directly in the train function
+  importance = TRUE
+)
+
+# Print the best model from tuning
+print("Best Random Forest Model for Sales Volume Prediction:")
+print(rf_model_tuned_sales)
+
+# Make predictions on the test set using the tuned model
+pred_sales_rf_tuned <- predict(rf_model_tuned_sales, test_data_sales)
+
+# Evaluate the tuned model using MAE and RMSE
+train_mae_sales_rf <- mae(train_data_sales$Monthly_Sales_Volume_per_Dealer, predict(rf_model_tuned_sales, train_data_sales))
+test_mae_sales_rf <- mae(test_data_sales$Monthly_Sales_Volume_per_Dealer, pred_sales_rf_tuned)
+train_rmse_sales_rf <- rmse(train_data_sales$Monthly_Sales_Volume_per_Dealer, predict(rf_model_tuned_sales, train_data_sales))
+test_rmse_sales_rf <- rmse(test_data_sales$Monthly_Sales_Volume_per_Dealer, pred_sales_rf_tuned)
+
+# Contextualization of MAE and RMSE for Sales Volume
+mean_sales <- mean(test_data_sales$Monthly_Sales_Volume_per_Dealer)
+train_mae_sales_pct_rf <- (train_mae_sales_rf / mean_sales) * 100
+test_mae_sales_pct_rf <- (test_mae_sales_rf / mean_sales) * 100
+train_rmse_sales_pct_rf <- (train_rmse_sales_rf / mean_sales) * 100
+test_rmse_sales_pct_rf <- (test_rmse_sales_rf / mean_sales) * 100
+
+# Print evaluation metrics
+print(paste("Train MAE Sales (RF):", train_mae_sales_rf, "(", train_mae_sales_pct_rf, "% of Mean Sales)"))
+print(paste("Test MAE Sales (RF):", test_mae_sales_rf, "(", test_mae_sales_pct_rf, "% of Mean Sales)"))
+print(paste("Train RMSE Sales (RF):", train_rmse_sales_rf, "(", train_rmse_sales_pct_rf, "% of Mean Sales)"))
+print(paste("Test RMSE Sales (RF):", test_rmse_sales_rf, "(", test_rmse_sales_pct_rf, "% of Mean Sales)"))
+
+# Visualization for Sales Volume Prediction
+results_sales_rf_tuned <- data.frame(Actual = test_data_sales$Monthly_Sales_Volume_per_Dealer, Predicted = pred_sales_rf_tuned)
+plot_sales_rf <- ggplot(results_sales_rf_tuned, aes(x = Actual, y = Predicted)) +
+  geom_point(color = 'blue', alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = 'red', linetype = 'dashed') +
+  ggtitle('Monthly Sales Volume Per Dealer: Actual vs Predicted (Random Forest)') +
+  xlab('Actual Sales Volume') +
+  ylab('Predicted Sales Volume') +
+  theme_minimal(base_family = "Arial", base_size = 14) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    legend.background = element_rect(fill = "white"),
+    legend.key = element_rect(fill = "white"),
+    strip.background = element_rect(fill = "white")
+  )
+print(plot_sales_rf)
+
+# Save Sales Volume plot
+ggsave("Sales Volume Prediction RF.png", plot = plot_sales_rf, width = 10, height = 6)
+
+```
+
+
+## Random Forest for NPS
+```{r message=FALSE, warning=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Feature Selection using Random Forest for NPS Prediction
+# Build a preliminary Random Forest model for NPS Score
+rf_model_prel_nps <- randomForest(NPS_Score ~ ., data = train_data_nps, ntree = 100, importance = TRUE)
+
+# Get variable importance for NPS
+var_importance_nps <- importance(rf_model_prel_nps)
+
+# Create a data frame with feature importance for NPS
+importance_df_nps <- data.frame(Feature = rownames(var_importance_nps), Importance = var_importance_nps[, "IncNodePurity"])
+
+# Filter features with significant importance for NPS
+significant_features_rf_nps <- importance_df_nps %>%
+  filter(Importance > quantile(Importance, 0.25)) %>%  # Retain top 75% important features
+  pull(Feature)
+
+# Select columns using the significant features vector for NPS
+modeling_data_nps_rf <- train_data_nps[, significant_features_rf_nps, drop = FALSE]
+
+# Add target variable to modeling data
+modeling_data_nps_rf$NPS_Score <- train_data_nps$NPS_Score
+
+# Define hyperparameter grid for tuning (only mtry is used)
+tune_grid_rf_nps <- expand.grid(mtry = seq(2, length(significant_features_rf_nps), by = 2))
+
+# Define cross-validation method
+control_rf_nps <- trainControl(method = "cv", number = 5)
+
+# Train Random Forest model with hyperparameter tuning for NPS
+rf_model_tuned_nps <- train(
+  NPS_Score ~ .,
+  data = modeling_data_nps_rf,
+  method = "rf",
+  tuneGrid = tune_grid_rf_nps,
+  trControl = control_rf_nps,
+  ntree = 200,  # Set ntree directly in the train function
+  importance = TRUE
+)
+
+# Print the best model from tuning
+print("Best Random Forest Model for NPS Prediction:")
+print(rf_model_tuned_nps)
+
+# Make predictions on the test set using the tuned model
+pred_nps_rf_tuned <- predict(rf_model_tuned_nps, test_data_nps)
+
+# Evaluate the tuned model using MAE and RMSE
+train_mae_nps_rf <- mae(train_data_nps$NPS_Score, predict(rf_model_tuned_nps, train_data_nps))
+test_mae_nps_rf <- mae(test_data_nps$NPS_Score, pred_nps_rf_tuned)
+train_rmse_nps_rf <- rmse(train_data_nps$NPS_Score, predict(rf_model_tuned_nps, train_data_nps))
+test_rmse_nps_rf <- rmse(test_data_nps$NPS_Score, pred_nps_rf_tuned)
+
+# Print evaluation metrics
+print(paste("Train MAE NPS (RF):", train_mae_nps_rf))
+print(paste("Test MAE NPS (RF):", test_mae_nps_rf))
+print(paste("Train RMSE NPS (RF):", train_rmse_nps_rf))
+print(paste("Test RMSE NPS (RF):", test_rmse_nps_rf))
+
+# Contextualization of MAE and RMSE for NPS
+mean_nps <- mean(test_data_nps$NPS_Score)
+train_mae_nps_pct_rf <- (train_mae_nps_rf / mean_nps) * 100
+test_mae_nps_pct_rf <- (test_mae_nps_rf / mean_nps) * 100
+train_rmse_nps_pct_rf <- (train_rmse_nps_rf / mean_nps) * 100
+test_rmse_nps_pct_rf <- (test_rmse_nps_rf / mean_nps) * 100
+
+# Print contextualized evaluation metrics
+print(paste("Train MAE as a percentage of Mean NPS (RF):", train_mae_nps_pct_rf))
+print(paste("Test MAE as a percentage of Mean NPS (RF):", test_mae_nps_pct_rf))
+print(paste("Train RMSE as a percentage of Mean NPS (RF):", train_rmse_nps_pct_rf))
+print(paste("Test RMSE as a percentage of Mean NPS (RF):", test_rmse_nps_pct_rf))
+
+# Visualization for NPS Prediction using Random Forest
+results_nps_rf_tuned <- data.frame(Actual = test_data_nps$NPS_Score, Predicted = pred_nps_rf_tuned)
+plot_nps_rf_tuned <- ggplot(results_nps_rf_tuned, aes(x = Actual, y = Predicted)) +
+  geom_point(color = 'blue', alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = 'red', linetype = 'dashed') +
+  ggtitle('NPS: Actual vs Predicted (Random Forest)') +
+  xlab('Actual NPS') +
+  ylab('Predicted NPS') +
+  theme_minimal(base_family = "Arial", base_size = 14) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    legend.background = element_rect(fill = "white"),
+    legend.key = element_rect(fill = "white"),
+    strip.background = element_rect(fill = "white")
+  )
+print(plot_nps_rf_tuned)
+
+# Save NPS plot
+ggsave("NPS Prediction RF.png", plot = plot_nps_rf_tuned, width = 10, height = 6)
+```
+
+
+## Random Forest for Efficiency
+```{r message=FALSE, warning=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Feature Selection using Random Forest for DEA Efficiency Prediction
+# Build a preliminary Random Forest model for DEA Efficiency
+rf_model_prel_efficiency <- randomForest(DEA_Efficiency ~ ., data = train_data_efficiency, ntree = 100, importance = TRUE)
+
+# Get variable importance for DEA Efficiency
+var_importance_efficiency <- importance(rf_model_prel_efficiency)
+
+# Create a data frame with feature importance for DEA Efficiency
+importance_df_efficiency <- data.frame(
+  Feature = rownames(var_importance_efficiency), 
+  Importance = var_importance_efficiency[, "IncNodePurity"]
+)
+
+# Filter features with significant importance for DEA Efficiency
+significant_features_rf_efficiency <- importance_df_efficiency %>%
+  filter(Importance > quantile(Importance, 0.25)) %>%  # Retain top 75% important features
+  pull(Feature)
+
+# Select columns using the significant features vector for DEA Efficiency
+modeling_data_efficiency_rf <- train_data_efficiency[, significant_features_rf_efficiency, drop = FALSE]
+
+# Add the target variable DEA_Efficiency to the modeling data
+modeling_data_efficiency_rf$DEA_Efficiency <- train_data_efficiency$DEA_Efficiency
+
+# Define a hyperparameter grid for tuning only mtry
+tune_grid_rf_efficiency <- expand.grid(
+  mtry = seq(2, length(significant_features_rf_efficiency), by = 2) # Use length(significant_features_rf_efficiency) to dynamically adapt to number of features
+)
+
+# Define cross-validation method with more folds
+control_rf_efficiency <- trainControl(method = "cv", number = 10)
+
+# Train Random Forest model with hyperparameter tuning for efficiency
+rf_model_tuned_efficiency <- train(
+  DEA_Efficiency ~ .,
+  data = modeling_data_efficiency_rf,
+  method = "rf",
+  tuneGrid = tune_grid_rf_efficiency,
+  trControl = control_rf_efficiency,
+  ntree = 200,  # Set ntree directly in the train function
+  importance = TRUE
+)
+
+# Print the best model from tuning
+print("Best Random Forest Model for Efficiency Prediction:")
+print(rf_model_tuned_efficiency)
+
+# Make predictions on the test set using the tuned model
+pred_efficiency_rf_tuned <- predict(rf_model_tuned_efficiency, test_data_efficiency)
+
+# Evaluate the tuned model using MAE and RMSE
+train_mae_efficiency_rf <- mae(train_data_efficiency$DEA_Efficiency, predict(rf_model_tuned_efficiency, train_data_efficiency))
+test_mae_efficiency_rf <- mae(test_data_efficiency$DEA_Efficiency, pred_efficiency_rf_tuned)
+train_rmse_efficiency_rf <- rmse(train_data_efficiency$DEA_Efficiency, predict(rf_model_tuned_efficiency, train_data_efficiency))
+test_rmse_efficiency_rf <- rmse(test_data_efficiency$DEA_Efficiency, pred_efficiency_rf_tuned)
+
+# Contextualization of MAE and RMSE for Efficiency
+mean_efficiency <- mean(test_data_efficiency$DEA_Efficiency)
+train_mae_efficiency_pct_rf <- (train_mae_efficiency_rf / mean_efficiency) * 100
+test_mae_efficiency_pct_rf <- (test_mae_efficiency_rf / mean_efficiency) * 100
+train_rmse_efficiency_pct_rf <- (train_rmse_efficiency_rf / mean_efficiency) * 100
+test_rmse_efficiency_pct_rf <- (test_rmse_efficiency_rf / mean_efficiency) * 100
+
+# Print evaluation metrics
+print(paste("Train MAE Efficiency (RF):", train_mae_efficiency_rf, "(", train_mae_efficiency_pct_rf, "% of Mean Efficiency)"))
+print(paste("Test MAE Efficiency (RF):", test_mae_efficiency_rf, "(", test_mae_efficiency_pct_rf, "% of Mean Efficiency)"))
+print(paste("Train RMSE Efficiency (RF):", train_rmse_efficiency_rf, "(", train_rmse_efficiency_pct_rf, "% of Mean Efficiency)"))
+print(paste("Test RMSE Efficiency (RF):", test_rmse_efficiency_rf, "(", test_rmse_efficiency_pct_rf, "% of Mean Efficiency)"))
+
+# Visualization for Efficiency Prediction
+results_efficiency_rf_tuned <- data.frame(Actual = test_data_efficiency$DEA_Efficiency, Predicted = pred_efficiency_rf_tuned)
+plot_efficiency_rf <- ggplot(results_efficiency_rf_tuned, aes(x = Actual, y = Predicted)) +
+  geom_point(color = 'blue', alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = 'red', linetype = 'dashed') +
+  ggtitle('DEA Efficiency Scores: Actual vs Predicted (Random Forest)') +
+  xlab('Actual Efficiency') +
+  ylab('Predicted Efficiency') +
+  theme_minimal(base_family = "Arial", base_size = 14) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    legend.background = element_rect(fill = "white"),
+    legend.key = element_rect(fill = "white"),
+    strip.background = element_rect(fill = "white")
+  )
+print(plot_efficiency_rf)
+
+# Save Efficiency plot
+ggsave("Efficiency Prediction RF.png", plot = plot_efficiency_rf, width = 10, height = 6)
+```
+
+
+# Predictive Modelling: ARIMA
+```{r}
+# Set seed for reproducibility
+set.seed(123)
+
+# Create copies for ARIMA-specific modifications
+train_data_sales_arima <- train_data_sales
+test_data_sales_arima <- test_data_sales
+train_data_nps_arima <- train_data_nps
+test_data_nps_arima <- test_data_nps
+train_data_efficiency_arima <- train_data_efficiency
+test_data_efficiency_arima <- test_data_efficiency
+
+# Convert 'Date' column to Date type if not already
+train_data_sales_arima$Date <- as.Date(train_data_sales_arima$Date)
+test_data_sales_arima$Date <- as.Date(test_data_sales_arima$Date)
+
+train_data_nps_arima$Date <- as.Date(train_data_nps_arima$Date)
+test_data_nps_arima$Date <- as.Date(test_data_nps_arima$Date)
+
+train_data_efficiency_arima$Date <- as.Date(train_data_efficiency_arima$Date)
+test_data_efficiency_arima$Date <- as.Date(test_data_efficiency_arima$Date)
+
+# Verify that dates are of Date class
+print(class(train_data_sales_arima$Date))
+print(class(test_data_sales_arima$Date))
+
+print(class(train_data_nps_arima$Date))
+print(class(test_data_nps_arima$Date))
+
+print(class(train_data_efficiency_arima$Date))
+print(class(test_data_efficiency_arima$Date))
+```
+
+
+## ARIMA for Sales Volume
+```{r message=FALSE, warning=FALSE}
+# Convert the training data to a time series object for ARIMA
+sales_ts_train_arima <- ts(
+  train_data_sales_arima$Monthly_Sales_Volume_per_Dealer, 
+  frequency = 12, 
+  start = c(year(min(train_data_sales_arima$Date)), month(min(train_data_sales_arima$Date)))
+)
+
+# Use auto.arima to select the best ARIMA model parameters
+best_arima_model_sales <- auto.arima(sales_ts_train_arima, seasonal = TRUE, stepwise = TRUE, approximation = FALSE)
+summary(best_arima_model_sales)
+
+# Determine the number of periods to forecast based on the test data
+forecast_horizon_arima <- nrow(test_data_sales_arima)
+
+# Forecast using the fitted ARIMA model, limited to the length of the test data
+forecast_sales_arima <- forecast(best_arima_model_sales, h = forecast_horizon_arima)
+
+# Create time series objects
+sales_ts_train_arima <- ts(
+  train_data_sales_arima$Monthly_Sales_Volume_per_Dealer, 
+  frequency = 12, 
+  start = c(year(min(train_data_sales_arima$Date)), month(min(train_data_sales_arima$Date)))
+)
+
+sales_ts_test_arima <- ts(
+  test_data_sales_arima$Monthly_Sales_Volume_per_Dealer, 
+  frequency = 12, 
+  start = c(year(min(test_data_sales_arima$Date)), month(min(test_data_sales_arima$Date)))
+)
+
+# Forecast based on ARIMA model
+forecast_sales_arima <- forecast(auto.arima(sales_ts_train_arima), h = length(sales_ts_test_arima))
+
+# Combine forecast with dates
+forecast_data_arima <- data.frame(
+  Date = seq.Date(
+    from = min(test_data_sales_arima$Date), 
+    by = "month", 
+    length.out = length(forecast_sales_arima$mean)
+  ),
+  Forecast = forecast_sales_arima$mean
+)
+
+# Combine actual data with dates
+actual_data_arima <- data.frame(
+  Date = test_data_sales_arima$Date,
+  Actual = test_data_sales_arima$Monthly_Sales_Volume_per_Dealer
+)
+
+# Plot with ggplot
+ggplot() +
+  geom_point(data = actual_data_arima, aes(x = Date, y = Actual, color = "Actual"), size = 2) +
+  geom_line(data = forecast_data_arima, aes(x = Date, y = Forecast, color = "Forecast"), size = 1.2) +
+  scale_color_manual(values = c("Actual" = "red", "Forecast" = "blue")) +
+  labs(title = "Monthly Sales Volume Per Dealer Prediction Using ARIMA",
+       x = "Date",
+       y = "Sales Volume",
+       color = "Series") +
+  theme_light() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10), # Adjust text size
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5, size = 14),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "2 months",  # Show fewer x-axis labels to avoid overlap
+    expand = c(0, 0)           # Remove extra space
+  ) +
+  coord_cartesian(xlim = as.Date(c("2023-05-01", "2024-05-31")), ylim = c(0, max(actual_data_arima$Actual, na.rm = TRUE) * 1.2))  # Adjust y-limits to provide buffer
+
+# Save the plot
+ggsave("Sales Volume Prediction ARIMA.png", width = 10, height = 6)
+
+# Print the first few values of the test and forecast series
+cat("First few actual values:\n")
+print(head(sales_ts_test_arima))
+cat("First few forecast values:\n")
+print(head(forecast_sales_arima$mean))
+
+# Check for non-numeric values
+cat("Checking data types:\n")
+cat("Actual series type:", typeof(sales_ts_test_arima), "\n")
+cat("Forecast series type:", typeof(forecast_sales_arima$mean), "\n")
+
+# Ensure data is numeric
+sales_ts_test_arima <- as.numeric(sales_ts_test_arima)
+forecast_sales_arima$mean <- as.numeric(forecast_sales_arima$mean)
+
+# Check for infinite values
+cat("Checking for Inf values:\n")
+inf_in_actual <- any(is.infinite(sales_ts_test_arima))
+inf_in_forecast <- any(is.infinite(forecast_sales_arima$mean))
+cat("Inf in actual:", inf_in_actual, "\n")
+cat("Inf in forecast:", inf_in_forecast, "\n")
+
+# Check for matching start and end dates
+cat("Actual start:", start(sales_ts_test_arima), "\n")
+cat("Actual end:", end(sales_ts_test_arima), "\n")
+cat("Forecast start:", start(forecast_sales_arima$mean), "\n")
+cat("Forecast end:", end(forecast_sales_arima$mean), "\n")
+
+# Compute MAE and RMSE if lengths match
+actual_length <- length(sales_ts_test_arima)
+forecast_length <- length(forecast_sales_arima$mean)
+
+if (actual_length == forecast_length) {
+  mae_sales_arima <- mean(abs(sales_ts_test_arima - forecast_sales_arima$mean), na.rm = TRUE)
+  rmse_sales_arima <- sqrt(mean((sales_ts_test_arima - forecast_sales_arima$mean)^2, na.rm = TRUE))
+  
+  print(paste("MAE for ARIMA model (Sales Volume):", mae_sales_arima))
+  print(paste("RMSE for ARIMA model (Sales Volume):", rmse_sales_arima))
+} else {
+  print("Error: Length of actual and forecasted series do not match.")
+}
+```
+
+
+## ARIMA for NPS Score
+```{r message=FALSE, warning=FALSE}
+# Convert the training data to a time series object for ARIMA
+nps_ts_train_arima <- ts(
+  train_data_nps_arima$NPS_Score, 
+  frequency = 12, 
+  start = c(year(min(train_data_nps_arima$Date)), month(min(train_data_nps_arima$Date)))
+)
+
+# Use auto.arima to select the best ARIMA model parameters
+best_arima_model_nps <- auto.arima(nps_ts_train_arima, seasonal = TRUE, stepwise = TRUE, approximation = FALSE)
+summary(best_arima_model_nps)
+
+# Determine the number of periods to forecast based on the test data
+forecast_horizon_arima <- nrow(test_data_nps_arima)
+
+# Forecast using the fitted ARIMA model, limited to the length of the test data
+forecast_nps_arima <- forecast(best_arima_model_nps, h = forecast_horizon_arima)
+
+# Create time series objects for the test data
+nps_ts_test_arima <- ts(
+  test_data_nps_arima$NPS_Score, 
+  frequency = 12, 
+  start = c(year(min(test_data_nps_arima$Date)), month(min(test_data_nps_arima$Date)))
+)
+
+# Combine forecast with dates
+forecast_data_arima <- data.frame(
+  Date = seq.Date(
+    from = min(test_data_nps_arima$Date), 
+    by = "month", 
+    length.out = length(forecast_nps_arima$mean)
+  ),
+  Forecast = forecast_nps_arima$mean
+)
+
+# Combine actual data with dates
+actual_data_arima <- data.frame(
+  Date = test_data_nps_arima$Date,
+  Actual = test_data_nps_arima$NPS_Score
+)
+
+# Plot with ggplot
+ggplot() +
+  geom_point(data = actual_data_arima, aes(x = Date, y = Actual, color = "Actual"), size = 2) +
+  geom_line(data = forecast_data_arima, aes(x = Date, y = Forecast, color = "Forecast"), size = 1.2) +
+  scale_color_manual(values = c("Actual" = "red", "Forecast" = "blue")) +
+  labs(title = "NPS Prediction Using ARIMA",
+       x = "Date",
+       y = "NPS",
+       color = "Series") +
+  theme_light() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10), # Adjust text size
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5, size = 14),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "2 months",  # Show fewer x-axis labels to avoid overlap
+    expand = c(0, 0)           # Remove extra space
+  ) +
+  coord_cartesian(xlim = as.Date(c("2023-05-01", "2024-05-31")), ylim = c(0, max(actual_data_arima$Actual, na.rm = TRUE) * 1.2))  # Adjust y-limits to provide buffer
+
+# Save the plot
+ggsave("NPS Prediction ARIMA.png", width = 10, height = 6)
+
+# Print the first few values of the test and forecast series
+cat("First few actual values:\n")
+print(head(nps_ts_test_arima))
+cat("First few forecast values:\n")
+print(head(forecast_nps_arima$mean))
+
+# Check for non-numeric values
+cat("Checking data types:\n")
+cat("Actual series type:", typeof(nps_ts_test_arima), "\n")
+cat("Forecast series type:", typeof(forecast_nps_arima$mean), "\n")
+
+# Ensure data is numeric
+nps_ts_test_arima <- as.numeric(nps_ts_test_arima)
+forecast_nps_arima$mean <- as.numeric(forecast_nps_arima$mean)
+
+# Check for infinite values
+cat("Checking for Inf values:\n")
+inf_in_actual <- any(is.infinite(nps_ts_test_arima))
+inf_in_forecast <- any(is.infinite(forecast_nps_arima$mean))
+cat("Inf in actual:", inf_in_actual, "\n")
+cat("Inf in forecast:", inf_in_forecast, "\n")
+
+# Check for matching start and end dates
+cat("Actual start:", start(nps_ts_test_arima), "\n")
+cat("Actual end:", end(nps_ts_test_arima), "\n")
+cat("Forecast start:", start(forecast_nps_arima$mean), "\n")
+cat("Forecast end:", end(forecast_nps_arima$mean), "\n")
+
+# Compute MAE and RMSE if lengths match
+actual_length <- length(nps_ts_test_arima)
+forecast_length <- length(forecast_nps_arima$mean)
+
+if (actual_length == forecast_length) {
+  mae_nps_arima <- mean(abs(nps_ts_test_arima - forecast_nps_arima$mean), na.rm = TRUE)
+  rmse_nps_arima <- sqrt(mean((nps_ts_test_arima - forecast_nps_arima$mean)^2, na.rm = TRUE))
+  
+  print(paste("MAE for ARIMA model (NPS):", mae_nps_arima))
+  print(paste("RMSE for ARIMA model (NPS):", rmse_nps_arima))
+} else {
+  print("Error: Length of actual and forecasted series do not match.")
+}
+```
+
+
+## ARIMA for Efficiency
+```{r message=FALSE, warning=FALSE}
+# Convert 'Date' column to Date type if not already
+train_data_efficiency_arima$Date <- as.Date(train_data_efficiency_arima$Date)
+test_data_efficiency_arima$Date <- as.Date(test_data_efficiency_arima$Date)
+
+# Verify that dates are of Date class
+print(class(train_data_efficiency_arima$Date))
+print(class(test_data_efficiency_arima$Date))
+
+# Convert the training data to a time series object for ARIMA
+efficiency_ts_train_arima <- ts(
+  train_data_efficiency_arima$DEA_Efficiency, 
+  frequency = 12, 
+  start = c(year(min(train_data_efficiency_arima$Date)), month(min(train_data_efficiency_arima$Date)))
+)
+
+# Use auto.arima to select the best ARIMA model parameters
+best_arima_model_efficiency <- auto.arima(efficiency_ts_train_arima, seasonal = TRUE, stepwise = TRUE, approximation = FALSE)
+summary(best_arima_model_efficiency)
+
+# Determine the number of periods to forecast based on the test data
+forecast_horizon_arima <- nrow(test_data_efficiency_arima)
+
+# Forecast using the fitted ARIMA model, limited to the length of the test data
+forecast_efficiency_arima <- forecast(best_arima_model_efficiency, h = forecast_horizon_arima)
+
+# Create time series objects for the test data
+efficiency_ts_test_arima <- ts(
+  test_data_efficiency_arima$DEA_Efficiency, 
+  frequency = 12, 
+  start = c(year(min(test_data_efficiency_arima$Date)), month(min(test_data_efficiency_arima$Date)))
+)
+
+# Combine forecast with dates
+forecast_data_arima <- data.frame(
+  Date = seq.Date(
+    from = min(test_data_efficiency_arima$Date), 
+    by = "month", 
+    length.out = length(forecast_efficiency_arima$mean)
+  ),
+  Forecast = forecast_efficiency_arima$mean
+)
+
+# Combine actual data with dates
+actual_data_arima <- data.frame(
+  Date = test_data_efficiency_arima$Date,
+  Actual = test_data_efficiency_arima$DEA_Efficiency
+)
+
+# Plot with ggplot
+ggplot() +
+  geom_point(data = actual_data_arima, aes(x = Date, y = Actual, color = "Actual"), size = 2) +
+  geom_line(data = forecast_data_arima, aes(x = Date, y = Forecast, color = "Forecast"), size = 1.2) +
+  scale_color_manual(values = c("Actual" = "red", "Forecast" = "blue")) +
+  labs(title = "DEA Efficiency Scores Prediction Using ARIMA",
+       x = "Date",
+       y = "DEA Efficiency",
+       color = "Series") +
+  theme_light() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10), # Adjust text size
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5, size = 14),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "2 months",  # Show fewer x-axis labels to avoid overlap
+    expand = c(0, 0)           # Remove extra space
+  ) +
+  coord_cartesian(xlim = as.Date(c("2023-05-01", "2024-05-31")), ylim = c(0, max(actual_data_arima$Actual, na.rm = TRUE) * 1.2))  # Adjust y-limits to provide buffer
+
+# Save the plot
+ggsave("Efficiency Prediction ARIMA.png", width = 10, height = 6)
+
+# Print the first few values of the test and forecast series
+cat("First few actual values:\n")
+print(head(efficiency_ts_test_arima))
+cat("First few forecast values:\n")
+print(head(forecast_efficiency_arima$mean))
+
+# Check for non-numeric values
+cat("Checking data types:\n")
+cat("Actual series type:", typeof(efficiency_ts_test_arima), "\n")
+cat("Forecast series type:", typeof(forecast_efficiency_arima$mean), "\n")
+
+# Ensure data is numeric
+efficiency_ts_test_arima <- as.numeric(efficiency_ts_test_arima)
+forecast_efficiency_arima$mean <- as.numeric(forecast_efficiency_arima$mean)
+
+# Check for infinite values
+cat("Checking for Inf values:\n")
+inf_in_actual <- any(is.infinite(efficiency_ts_test_arima))
+inf_in_forecast <- any(is.infinite(forecast_efficiency_arima$mean))
+cat("Inf in actual:", inf_in_actual, "\n")
+cat("Inf in forecast:", inf_in_forecast, "\n")
+
+# Check for matching start and end dates
+cat("Actual start:", start(efficiency_ts_test_arima), "\n")
+cat("Actual end:", end(efficiency_ts_test_arima), "\n")
+cat("Forecast start:", start(forecast_efficiency_arima$mean), "\n")
+cat("Forecast end:", end(forecast_efficiency_arima$mean), "\n")
+
+# Compute MAE and RMSE if lengths match
+actual_length <- length(efficiency_ts_test_arima)
+forecast_length <- length(forecast_efficiency_arima$mean)
+
+if (actual_length == forecast_length) {
+  mae_efficiency_arima <- mean(abs(efficiency_ts_test_arima - forecast_efficiency_arima$mean), na.rm = TRUE)
+  rmse_efficiency_arima <- sqrt(mean((efficiency_ts_test_arima - forecast_efficiency_arima$mean)^2, na.rm = TRUE))
+  
+  print(paste("MAE for ARIMA model (DEA Efficiency):", mae_efficiency_arima))
+  print(paste("RMSE for ARIMA model (DEA Efficiency):", rmse_efficiency_arima))
+} else {
+  print("Error: Length of actual and forecasted series do not match.")
+}
+```
+
+
+# Predictive Modelling: SVM
+
+## SVM for Sales Volume
+```{r message=FALSE, warning=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Extract features and target variable
+outcome_name_sales_svm <- "Monthly_Sales_Volume_per_Dealer"
+predictor_names_sales_svm <- setdiff(names(train_data_sales), c("Monthly_Sales_Volume_per_Dealer", "Date"))
+
+x_train_sales_svm <- train_data_sales[, predictor_names_sales_svm]
+y_train_sales_svm <- train_data_sales[[outcome_name_sales_svm]]
+x_test_sales_svm <- test_data_sales[, predictor_names_sales_svm]
+y_test_sales_svm <- test_data_sales[[outcome_name_sales_svm]]
+
+# Perform Feature Scaling
+pre_proc_sales_svm <- preProcess(x_train_sales_svm, method = c("center", "scale"))
+x_train_sales_svm <- predict(pre_proc_sales_svm, x_train_sales_svm)
+x_test_sales_svm <- predict(pre_proc_sales_svm, x_test_sales_svm)
+
+# Feature Selection using RFE
+control_rfe_sales_svm <- rfeControl(functions = rfFuncs, method = "cv", number = 5)
+# Using Random Forest for feature selection as it's robust
+rfe_results_sales_svm <- rfe(x_train_sales_svm, y_train_sales_svm, sizes = c(1:10), rfeControl = control_rfe_sales_svm)
+
+# Get the selected features
+selected_predictors_sales_svm <- predictors(rfe_results_sales_svm)
+print("Selected Features for Sales Volume SVM:")
+print(selected_predictors_sales_svm)
+
+# Subset the training and test data based on selected features
+x_train_selected_sales_svm <- x_train_sales_svm[, selected_predictors_sales_svm]
+x_test_selected_sales_svm <- x_test_sales_svm[, selected_predictors_sales_svm]
+
+# Use a smaller subset for parameter tuning
+sample_size_sales_svm <- min(500, nrow(train_data_sales))  # Use a maximum of 500 samples for tuning
+train_sample_sales_svm <- train_data_sales[sample(1:nrow(train_data_sales), sample_size_sales_svm), selected_predictors_sales_svm]
+
+# Prepare for training with cross-validation
+control_svm_sales <- trainControl(method = "cv", number = 5)
+tune_grid_sales_svm <- expand.grid(C = seq(0.01, 1, length = 5))  # Regularization parameter grid
+
+# Fit SVM model with linear kernel for faster results
+svm_model_sales_volume <- train(
+  x = x_train_selected_sales_svm,
+  y = y_train_sales_svm,
+  method = "svmLinear",  # Use a linear kernel for faster computation
+  tuneGrid = tune_grid_sales_svm,
+  trControl = control_svm_sales
+)
+
+# Print best parameters
+print("Best Parameters for SVM Sales Volume:")
+print(svm_model_sales_volume$bestTune)
+
+# Make predictions on the test set
+svm_predictions_sales_volume <- predict(svm_model_sales_volume, newdata = x_test_selected_sales_svm)
+
+# Evaluate model performance
+mae_svm_sales_volume <- mean(abs(y_test_sales_svm - svm_predictions_sales_volume))
+rmse_svm_sales_volume <- sqrt(mean((y_test_sales_svm - svm_predictions_sales_volume)^2))
+
+print(paste("MAE for SVM model (Sales Volume):", mae_svm_sales_volume))
+print(paste("RMSE for SVM model (Sales Volume):", rmse_svm_sales_volume))
+
+# Plot actual vs predicted
+actual_data_sales_svm <- data.frame(Date = test_data_sales$Date, Actual = y_test_sales_svm)
+predicted_data_sales_svm <- data.frame(Date = test_data_sales$Date, Predicted = svm_predictions_sales_volume)
+
+ggplot() +
+  geom_point(data = actual_data_sales_svm, aes(x = Date, y = Actual, color = "Actual"), size = 2) +
+  geom_line(data = predicted_data_sales_svm, aes(x = Date, y = Predicted, color = "Predicted"), size = 1.2) +
+  scale_color_manual(values = c("Actual" = "red", "Predicted" = "blue")) +
+  labs(title = "Monthly Sales Volume Per Dealer Prediction Using SVM (Linear Kernel)",
+       x = "Month",
+       y = "Sales Volume",
+       color = "Series") +
+  theme_light() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5, size = 14),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "2 months",
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(ylim = c(0, max(actual_data_sales_svm$Actual, na.rm = TRUE) * 1.2))
+
+# Save the plot
+ggsave("Sales Volume Prediction SVM.png", width = 10, height = 6)
+```
+
+
+## SVM for NPS
+```{r message=FALSE, warning=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Extract features and target variable for NPS_Score
+outcome_name_nps_svm <- "NPS_Score"
+predictor_names_nps_svm <- setdiff(names(train_data_nps), c("NPS_Score", "Date"))
+
+x_train_nps_svm <- train_data_nps[, predictor_names_nps_svm]
+y_train_nps_svm <- train_data_nps[[outcome_name_nps_svm]]
+x_test_nps_svm <- test_data_nps[, predictor_names_nps_svm]
+y_test_nps_svm <- test_data_nps[[outcome_name_nps_svm]]
+
+# Perform Feature Scaling
+pre_proc_nps_svm <- preProcess(x_train_nps_svm, method = c("center", "scale"))
+x_train_nps_svm <- predict(pre_proc_nps_svm, x_train_nps_svm)
+x_test_nps_svm <- predict(pre_proc_nps_svm, x_test_nps_svm)
+
+# Feature Selection using RFE
+control_rfe_nps_svm <- rfeControl(functions = rfFuncs, method = "cv", number = 5)
+# Using Random Forest for feature selection as it's robust
+rfe_results_nps_svm <- rfe(x_train_nps_svm, y_train_nps_svm, sizes = c(1:10), rfeControl = control_rfe_nps_svm)
+
+# Get the selected features
+selected_predictors_nps_svm <- predictors(rfe_results_nps_svm)
+print("Selected Features for NPS Score SVM:")
+print(selected_predictors_nps_svm)
+
+# Subset the training and test data based on selected features
+x_train_selected_nps_svm <- x_train_nps_svm[, selected_predictors_nps_svm]
+x_test_selected_nps_svm <- x_test_nps_svm[, selected_predictors_nps_svm]
+
+# Use a smaller subset for parameter tuning
+sample_size_nps_svm <- min(500, nrow(train_data_nps))  # Use a maximum of 500 samples for tuning
+train_sample_nps_svm <- train_data_nps[sample(1:nrow(train_data_nps), sample_size_nps_svm), selected_predictors_nps_svm]
+
+# Prepare for training with cross-validation
+control_svm_nps <- trainControl(method = "cv", number = 5)
+tune_grid_nps_svm <- expand.grid(C = seq(0.01, 1, length = 5))  # Regularization parameter grid
+
+# Fit SVM model with linear kernel for faster results
+svm_model_nps_score <- train(
+  x = x_train_selected_nps_svm,
+  y = y_train_nps_svm,
+  method = "svmLinear",  # Use a linear kernel for faster computation
+  tuneGrid = tune_grid_nps_svm,
+  trControl = control_svm_nps
+)
+
+# Print best parameters
+print("Best Parameters for SVM NPS Score:")
+print(svm_model_nps_score$bestTune)
+
+# Make predictions on the test set
+svm_predictions_nps_score <- predict(svm_model_nps_score, newdata = x_test_selected_nps_svm)
+
+# Evaluate model performance
+mae_svm_nps_score <- mean(abs(y_test_nps_svm - svm_predictions_nps_score))
+rmse_svm_nps_score <- sqrt(mean((y_test_nps_svm - svm_predictions_nps_score)^2))
+
+print(paste("MAE for SVM model (NPS Score):", mae_svm_nps_score))
+print(paste("RMSE for SVM model (NPS Score):", rmse_svm_nps_score))
+
+# Plot actual vs predicted
+actual_data_nps_svm <- data.frame(Date = test_data_nps$Date, Actual = y_test_nps_svm)
+predicted_data_nps_svm <- data.frame(Date = test_data_nps$Date, Predicted = svm_predictions_nps_score)
+
+ggplot() +
+  geom_point(data = actual_data_nps_svm, aes(x = Date, y = Actual, color = "Actual"), size = 2) +
+  geom_line(data = predicted_data_nps_svm, aes(x = Date, y = Predicted, color = "Predicted"), size = 1.2) +
+  scale_color_manual(values = c("Actual" = "red", "Predicted" = "blue")) +
+  labs(title = "NPS Prediction Using SVM (Linear Kernel)",
+       x = "Month",
+       y = "NPS",
+       color = "Series") +
+  theme_light() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5, size = 14),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "2 months",
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(ylim = c(0, max(actual_data_nps_svm$Actual, na.rm = TRUE) * 1.2))
+
+# Save the plot
+ggsave("NPS Prediction SVM.png", width = 10, height = 6)
+
+
+```
+
+
+## SVM for Efficiency
+```{r message=FALSE, warning=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Step 1: Prepare the data
+
+# Define the target variable and predictor variables
+target_variable_efficiency <- "DEA_Efficiency"
+predictors_efficiency <- setdiff(names(train_data_efficiency), c(target_variable_efficiency, "Date"))
+
+# Extract predictors and target for train and test data
+x_train_efficiency <- train_data_efficiency[, predictors_efficiency]
+y_train_efficiency <- train_data_efficiency[[target_variable_efficiency]]
+x_test_efficiency <- test_data_efficiency[, predictors_efficiency]
+y_test_efficiency <- test_data_efficiency[[target_variable_efficiency]]
+
+# Check and impute missing values using median
+x_train_efficiency <- x_train_efficiency %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+x_test_efficiency <- x_test_efficiency %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+# Ensure all predictors are numeric
+x_train_efficiency <- as.data.frame(lapply(x_train_efficiency, as.numeric))
+x_test_efficiency <- as.data.frame(lapply(x_test_efficiency, as.numeric))
+y_train_efficiency <- as.numeric(y_train_efficiency)
+y_test_efficiency <- as.numeric(y_test_efficiency)
+
+# Remove zero variance predictors
+zero_variance_efficiency <- nearZeroVar(x_train_efficiency, saveMetrics = TRUE)
+if (any(zero_variance_efficiency$zeroVar)) {
+  cat("Zero variance predictors found and removed:", names(zero_variance_efficiency[zero_variance_efficiency$zeroVar, ]), "\n")
+  x_train_efficiency <- x_train_efficiency[, !zero_variance_efficiency$zeroVar]
+  x_test_efficiency <- x_test_efficiency[, !zero_variance_efficiency$zeroVar]
+}
+
+# Step 2: Feature scaling
+preprocess_params_efficiency <- preProcess(x_train_efficiency, method = c("center", "scale"))
+x_train_scaled_efficiency <- predict(preprocess_params_efficiency, x_train_efficiency)
+x_test_scaled_efficiency <- predict(preprocess_params_efficiency, x_test_efficiency)
+
+# Step 3: Train the SVM model
+svm_model_efficiency <- train(
+  x = x_train_scaled_efficiency,
+  y = y_train_efficiency,
+  method = "svmLinear",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = expand.grid(C = seq(0.01, 1, length = 5))
+)
+
+# Print best model parameters
+cat("Best SVM Parameters for DEA Efficiency:\n")
+print(svm_model_efficiency$bestTune)
+
+# Step 4: Evaluate the model
+predictions_efficiency_svm <- predict(svm_model_efficiency, newdata = x_test_scaled_efficiency)
+
+# Calculate performance metrics
+mae_efficiency_svm <- mean(abs(y_test_efficiency - predictions_efficiency_svm))
+rmse_efficiency_svm <- sqrt(mean((y_test_efficiency - predictions_efficiency_svm)^2))
+
+cat("MAE for SVM model (DEA Efficiency):", mae_efficiency_svm, "\n")
+cat("RMSE for SVM model (DEA Efficiency):", rmse_efficiency_svm, "\n")
+
+# Step 5: Plot the results
+plot_data_efficiency_svm <- data.frame(
+  Date = test_data_efficiency$Date, 
+  Actual = y_test_efficiency, 
+  Predicted = predictions_efficiency_svm
+)
+
+ggplot(plot_data_efficiency_svm, aes(x = Date)) +
+  # Add points for actual values
+  geom_point(aes(y = Actual, color = "Actual"), size = 2, alpha = 0.7) +
+  # Add a smoothed line for predicted values
+  geom_line(aes(y = Predicted, color = "Predicted"), size = 1, alpha = 0.7) +
+  geom_smooth(aes(y = Predicted, color = "Predicted"), method = "loess", se = FALSE, linetype = "dashed", size = 1) +
+  # Customize colors for the points and line
+  scale_color_manual(values = c("Actual" = "red", "Predicted" = "blue")) +
+  # Add labels and title
+  labs(
+    title = "DEA Efficiency Scores Prediction Using SVM (Linear Kernel)",
+    x = "Date",
+    y = "DEA Efficiency",
+    color = "Legend"
+  ) +
+  # Use a theme with a white background and no dark elements
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "white", color = "white"),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  ) +
+  # Adjust the x-axis to display every two months
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "2 months",
+    expand = c(0, 0)
+  ) +
+  # Set y-axis limits if needed
+  coord_cartesian(ylim = c(min(y_test_efficiency) * 0.8, max(y_test_efficiency) * 1.2))
+
+# Save the plot
+ggsave("Efficiency Prediction SVM.png", width = 10, height = 6, dpi = 300)
+```
+
+
+# Predictive Modelling: GBM
+
+## GBM for Sales Volume
+```{r message=FALSE, warning=FALSE}
+# Define the target variable and predictor variables
+target_variable_sales <- "Monthly_Sales_Volume_per_Dealer"
+predictors_sales <- setdiff(names(data), c(target_variable_sales, "Date"))
+
+# Extract predictors and target for train and test data
+x_train_sales <- train_data_sales[, predictors_sales]
+y_train_sales <- train_data_sales[[target_variable_sales]]
+x_test_sales <- test_data_sales[, predictors_sales]
+y_test_sales <- test_data_sales[[target_variable_sales]]
+
+# Check and impute missing values using median
+x_train_sales <- x_train_sales %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+x_test_sales <- x_test_sales %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+# Ensure all predictors are numeric
+x_train_sales <- as.data.frame(lapply(x_train_sales, as.numeric))
+x_test_sales <- as.data.frame(lapply(x_test_sales, as.numeric))
+y_train_sales <- as.numeric(y_train_sales)
+y_test_sales <- as.numeric(y_test_sales)
+
+# Remove zero variance predictors
+zero_variance_sales <- nearZeroVar(x_train_sales, saveMetrics = TRUE)
+if (any(zero_variance_sales$zeroVar)) {
+  cat("Zero variance predictors found and removed:", names(zero_variance_sales[zero_variance_sales$zeroVar, ]), "\n")
+  x_train_sales <- x_train_sales[, !zero_variance_sales$zeroVar]
+  x_test_sales <- x_test_sales[, !zero_variance_sales$zeroVar]
+}
+
+# Step 1: Feature Selection using Recursive Feature Elimination (RFE)
+control_rfe_sales <- rfeControl(functions = rfFuncs, method = "cv", number = 5)
+# Using Random Forest for feature selection as it's robust
+rfe_results_sales <- rfe(x_train_sales, y_train_sales, sizes = c(1:10), rfeControl = control_rfe_sales)
+
+# Get the selected features
+selected_predictors_sales <- predictors(rfe_results_sales)
+cat("Selected Features for Sales Volume GBM:\n")
+print(selected_predictors_sales)
+
+# Subset the training and test data based on selected features
+x_train_selected_sales <- x_train_sales[, selected_predictors_sales]
+x_test_selected_sales <- x_test_sales[, selected_predictors_sales]
+
+# Step 2: Train the GBM model with Hyperparameter Tuning
+train_control_sales_gbm <- trainControl(method = "cv", number = 5)
+gbm_grid_sales <- expand.grid(
+  n.trees = seq(50, 500, by = 50),
+  interaction.depth = seq(1, 7, by = 2),
+  shrinkage = c(0.01, 0.05, 0.1),
+  n.minobsinnode = c(5, 10, 20)
+)
+
+gbm_model_sales <- train(
+  x = x_train_selected_sales,
+  y = y_train_sales,
+  method = "gbm",
+  trControl = train_control_sales_gbm,
+  tuneGrid = gbm_grid_sales,
+  verbose = FALSE
+)
+
+# Print best model parameters
+cat("Best GBM Parameters:\n")
+print(gbm_model_sales$bestTune)
+
+# Step 3: Evaluate the model
+predictions_sales_gbm <- predict(gbm_model_sales, newdata = x_test_selected_sales)
+
+# Calculate performance metrics
+mae_sales_gbm <- mean(abs(y_test_sales - predictions_sales_gbm))
+rmse_sales_gbm <- sqrt(mean((y_test_sales - predictions_sales_gbm)^2))
+
+cat("MAE for GBM model (Sales Volume):", mae_sales_gbm, "\n")
+cat("RMSE for GBM model (Sales Volume):", rmse_sales_gbm, "\n")
+
+# Step 4: Plot results
+plot_data_sales_gbm <- data.frame(Date = test_data_sales$Date, Actual = y_test_sales, Predicted = predictions_sales_gbm)
+
+ggplot(plot_data_sales_gbm, aes(x = Date)) +
+  geom_point(aes(y = Actual, color = "Actual"), size = 2) +
+  geom_line(aes(y = Predicted, color = "Predicted"), size = 1) +
+  scale_color_manual(values = c("Actual" = "red", "Predicted" = "blue")) +
+  labs(
+    title = "GBM Prediction for Monthly Sales Volume per Dealer",
+    x = "Date",
+    y = "Monthly Sales Volume",
+    color = "Legend"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "white", color = "white"),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  ) +
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "2 months",
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(ylim = c(min(y_test_sales) * 0.8, max(y_test_sales) * 1.2))
+
+# Save the plot
+ggsave("Sales Volume Prediction GBM.png", width = 10, height = 6, dpi = 300)
+```
+
+
+## GBM for NPS
+```{r message=FALSE, warning=FALSE}
+# Define the target variable and predictor variables
+target_variable_nps <- "NPS_Score"
+predictors_nps <- setdiff(names(data), c(target_variable_nps, "Date"))
+
+# Extract predictors and target for train and test data
+x_train_nps <- train_data_nps[, predictors_nps]
+y_train_nps <- train_data_nps[[target_variable_nps]]
+x_test_nps <- test_data_nps[, predictors_nps]
+y_test_nps <- test_data_nps[[target_variable_nps]]
+
+# Check and impute missing values using median
+x_train_nps <- x_train_nps %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+x_test_nps <- x_test_nps %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+# Ensure all predictors are numeric
+x_train_nps <- as.data.frame(lapply(x_train_nps, as.numeric))
+x_test_nps <- as.data.frame(lapply(x_test_nps, as.numeric))
+y_train_nps <- as.numeric(y_train_nps)
+y_test_nps <- as.numeric(y_test_nps)
+
+# Remove zero variance predictors
+zero_variance_nps <- nearZeroVar(x_train_nps, saveMetrics = TRUE)
+if (any(zero_variance_nps$zeroVar)) {
+  cat("Zero variance predictors found and removed:", names(zero_variance_nps[zero_variance_nps$zeroVar, ]), "\n")
+  x_train_nps <- x_train_nps[, !zero_variance_nps$zeroVar]
+  x_test_nps <- x_test_nps[, !zero_variance_nps$zeroVar]
+}
+
+# Step 1: Feature Selection using Recursive Feature Elimination (RFE)
+control_rfe_nps <- rfeControl(functions = rfFuncs, method = "cv", number = 5)
+# Using Random Forest for feature selection as it's robust
+rfe_results_nps <- rfe(x_train_nps, y_train_nps, sizes = c(1:10), rfeControl = control_rfe_nps)
+
+# Get the selected features
+selected_predictors_nps <- predictors(rfe_results_nps)
+cat("Selected Features for NPS Score GBM:\n")
+print(selected_predictors_nps)
+
+# Subset the training and test data based on selected features
+x_train_selected_nps <- x_train_nps[, selected_predictors_nps]
+x_test_selected_nps <- x_test_nps[, selected_predictors_nps]
+
+# Step 2: Train the GBM model with Hyperparameter Tuning
+train_control_nps_gbm <- trainControl(method = "cv", number = 5)
+gbm_grid_nps <- expand.grid(
+  n.trees = seq(50, 500, by = 50),
+  interaction.depth = seq(1, 7, by = 2),
+  shrinkage = c(0.01, 0.05, 0.1),
+  n.minobsinnode = c(5, 10, 20)
+)
+
+gbm_model_nps <- train(
+  x = x_train_selected_nps,
+  y = y_train_nps,
+  method = "gbm",
+  trControl = train_control_nps_gbm,
+  tuneGrid = gbm_grid_nps,
+  verbose = FALSE
+)
+
+# Print best model parameters
+cat("Best GBM Parameters for NPS Score:\n")
+print(gbm_model_nps$bestTune)
+
+# Step 3: Evaluate the model
+predictions_nps_gbm <- predict(gbm_model_nps, newdata = x_test_selected_nps)
+
+# Calculate performance metrics
+mae_nps_gbm <- mean(abs(y_test_nps - predictions_nps_gbm))
+rmse_nps_gbm <- sqrt(mean((y_test_nps - predictions_nps_gbm)^2))
+
+cat("MAE for GBM model (NPS):", mae_nps_gbm, "\n")
+cat("RMSE for GBM model (NPS):", rmse_nps_gbm, "\n")
+
+# Step 4: Plot results
+plot_data_nps_gbm <- data.frame(Date = test_data_nps$Date, Actual = y_test_nps, Predicted = predictions_nps_gbm)
+
+ggplot(plot_data_nps_gbm, aes(x = Date)) +
+  geom_point(aes(y = Actual, color = "Actual"), size = 2) +
+  geom_line(aes(y = Predicted, color = "Predicted"), size = 1) +
+  scale_color_manual(values = c("Actual" = "red", "Predicted" = "blue")) +
+  labs(
+    title = "GBM Prediction for NPS",
+    x = "Date",
+    y = "NPS Score",
+    color = "Legend"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "white", color = "white"),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  ) +
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "2 months",
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(ylim = c(min(y_test_nps) * 0.8, max(y_test_nps) * 1.2))
+
+# Save the plot
+ggsave("NPS Prediction GBM.png", width = 10, height = 6, dpi = 300)
+```
+
+
+## GBM for Efficiency
+```{r message=FALSE, warning=FALSE}
+# Define the target variable and predictor variables
+target_variable_efficiency <- "DEA_Efficiency"
+predictors_efficiency <- setdiff(names(data), c(target_variable_efficiency, "Date"))
+
+# Extract predictors and target for train and test data
+x_train_efficiency <- train_data_efficiency[, predictors_efficiency]
+y_train_efficiency <- train_data_efficiency[[target_variable_efficiency]]
+x_test_efficiency <- test_data_efficiency[, predictors_efficiency]
+y_test_efficiency <- test_data_efficiency[[target_variable_efficiency]]
+
+# Check and impute missing values using median
+x_train_efficiency <- x_train_efficiency %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+x_test_efficiency <- x_test_efficiency %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+# Ensure all predictors are numeric
+x_train_efficiency <- as.data.frame(lapply(x_train_efficiency, as.numeric))
+x_test_efficiency <- as.data.frame(lapply(x_test_efficiency, as.numeric))
+y_train_efficiency <- as.numeric(y_train_efficiency)
+y_test_efficiency <- as.numeric(y_test_efficiency)
+
+# Remove zero variance predictors
+zero_variance_efficiency <- nearZeroVar(x_train_efficiency, saveMetrics = TRUE)
+if (any(zero_variance_efficiency$zeroVar)) {
+  cat("Zero variance predictors found and removed:", names(zero_variance_efficiency[zero_variance_efficiency$zeroVar, ]), "\n")
+  x_train_efficiency <- x_train_efficiency[, !zero_variance_efficiency$zeroVar]
+  x_test_efficiency <- x_test_efficiency[, !zero_variance_efficiency$zeroVar]
+}
+
+# Step 1: Feature Selection using Recursive Feature Elimination (RFE)
+control_rfe_efficiency <- rfeControl(functions = rfFuncs, method = "cv", number = 5)
+# Using Random Forest for feature selection as it's robust
+rfe_results_efficiency <- rfe(x_train_efficiency, y_train_efficiency, sizes = c(1:10), rfeControl = control_rfe_efficiency)
+
+# Get the selected features
+selected_predictors_efficiency <- predictors(rfe_results_efficiency)
+cat("Selected Features for DEA Efficiency GBM:\n")
+print(selected_predictors_efficiency)
+
+# Subset the training and test data based on selected features
+x_train_selected_efficiency <- x_train_efficiency[, selected_predictors_efficiency]
+x_test_selected_efficiency <- x_test_efficiency[, selected_predictors_efficiency]
+
+# Step 2: Train the GBM model with Hyperparameter Tuning
+train_control_efficiency_gbm <- trainControl(method = "cv", number = 5)
+gbm_grid_efficiency <- expand.grid(
+  n.trees = seq(50, 500, by = 50),
+  interaction.depth = seq(1, 7, by = 2),
+  shrinkage = c(0.01, 0.05, 0.1),
+  n.minobsinnode = c(5, 10, 20)
+)
+
+gbm_model_efficiency <- train(
+  x = x_train_selected_efficiency,
+  y = y_train_efficiency,
+  method = "gbm",
+  trControl = train_control_efficiency_gbm,
+  tuneGrid = gbm_grid_efficiency,
+  verbose = FALSE
+)
+
+# Print best model parameters
+cat("Best GBM Parameters for DEA Efficiency:\n")
+print(gbm_model_efficiency$bestTune)
+
+# Step 3: Evaluate the model
+predictions_efficiency_gbm <- predict(gbm_model_efficiency, newdata = x_test_selected_efficiency)
+
+# Calculate performance metrics
+mae_efficiency_gbm <- mean(abs(y_test_efficiency - predictions_efficiency_gbm))
+rmse_efficiency_gbm <- sqrt(mean((y_test_efficiency - predictions_efficiency_gbm)^2))
+
+cat("MAE for GBM model (DEA Efficiency):", mae_efficiency_gbm, "\n")
+cat("RMSE for GBM model (DEA Efficiency):", rmse_efficiency_gbm, "\n")
+
+# Step 4: Plot results
+plot_data_efficiency_gbm <- data.frame(Date = test_data_efficiency$Date, Actual = y_test_efficiency, Predicted = predictions_efficiency_gbm)
+
+ggplot(plot_data_efficiency_gbm, aes(x = Date)) +
+  geom_point(aes(y = Actual, color = "Actual"), size = 2) +
+  geom_line(aes(y = Predicted, color = "Predicted"), size = 1) +
+  scale_color_manual(values = c("Actual" = "red", "Predicted" = "blue")) +
+  labs(
+    title = "GBM Prediction for DEA Efficiency Scores",
+    x = "Date",
+    y = "DEA Efficiency",
+    color = "Legend"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "white", color = "white"),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  ) +
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "2 months",
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(ylim = c(min(y_test_efficiency) * 0.8, max(y_test_efficiency) * 1.2))
+
+# Save the plot
+ggsave("Efficiency Prediction GBM.png", width = 10, height = 6, dpi = 300)
+```
+
+
+# Model Comparison for Sales Volume Prediction
+```{r message=FALSE, warning=FALSE}
+evaluation_results_sales <- data.frame(
+  Model = c("Linear Regression", "Random Forest", "ARIMA", "SVM", "GBM"),
+  Train_MAE = c(train_mae_sales_tuned, train_mae_sales_rf, mae_sales_arima, mae_svm_sales_volume, mae_sales_gbm),
+  Test_MAE = c(test_mae_sales_tuned, test_mae_sales_rf, mae_sales_arima, mae_svm_sales_volume, mae_sales_gbm),
+  Train_RMSE = c(train_rmse_sales_tuned, train_rmse_sales_rf, rmse_sales_arima, rmse_svm_sales_volume, rmse_sales_gbm),
+  Test_RMSE = c(test_rmse_sales_tuned, test_rmse_sales_rf, rmse_sales_arima, rmse_svm_sales_volume, rmse_sales_gbm)
+)
+
+# Print the evaluation results
+print("Evaluation Results for Sales Volume Prediction Models:")
+print(evaluation_results_sales)
+
+# Determine the best sales model based on Test MAE
+best_mae_model_sales <- evaluation_results_sales[which.min(evaluation_results_sales$Test_MAE), "Model"]
+best_mae_value_sales <- min(evaluation_results_sales$Test_MAE)
+
+# Determine the best sales model based on Test RMSE
+best_rmse_model_sales <- evaluation_results_sales[which.min(evaluation_results_sales$Test_RMSE), "Model"]
+best_rmse_value_sales <- min(evaluation_results_sales$Test_RMSE)
+
+# Print the best sales models
+cat("Best Model for Sales Volume based on Test MAE:", best_mae_model_sales, "with MAE =", best_mae_value_sales, "\n")
+cat("Best Model for Sales Volume based on Test RMSE:", best_rmse_model_sales, "with RMSE =", best_rmse_value_sales, "\n")
+
+# Melt the data for visualization
+evaluation_results_sales_melted <- melt(evaluation_results_sales, id.vars = "Model", variable.name = "Metric", value.name = "Value")
+
+# Plot
+ggplot(evaluation_results_sales_melted, aes(x = Model, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Metric, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Comparison of Model Performance for Predicting Monthly Sales Volume per Dealer",
+    y = "Error Value",
+    x = "Model"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "white", color = "white"),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  ) +
+  scale_fill_manual(values = c("Train_MAE" = "tomato", "Test_MAE" = "forestgreen", "Train_RMSE" = "skyblue", "Test_RMSE" = "purple")) +
+  coord_flip() # Flip the coordinates to make the bars horizontal
+
+# Save the plot
+ggsave("Sales Volume Model Comparison.png", width = 12, height = 8, dpi = 300)
+```
+
+
+# Model Comparison for NPS Prediction
+```{r message=FALSE, warning=FALSE}
+evaluation_results_nps <- data.frame(
+  Model = c("Linear Regression", "Random Forest", "ARIMA", "SVM", "GBM"),
+  Train_MAE = c(train_mae_nps_tuned, train_mae_nps_rf, mae_nps_arima, mae_svm_nps_score, mae_nps_gbm),
+  Test_MAE = c(test_mae_nps_tuned, test_mae_nps_rf, mae_nps_arima, mae_svm_nps_score, mae_nps_gbm),
+  Train_RMSE = c(train_rmse_nps_tuned, train_rmse_nps_rf, rmse_nps_arima, rmse_svm_nps_score, rmse_nps_gbm),
+  Test_RMSE = c(test_rmse_nps_tuned, test_rmse_nps_rf, rmse_nps_arima, rmse_svm_nps_score, rmse_nps_gbm)
+)
+
+# Print the evaluation results
+print("Evaluation Results for NPS Score Prediction Models:")
+print(evaluation_results_nps)
+
+# Determine the best NPS model based on Test MAE
+best_mae_model_nps <- evaluation_results_nps[which.min(evaluation_results_nps$Test_MAE), "Model"]
+best_mae_value_nps <- min(evaluation_results_nps$Test_MAE)
+
+# Determine the best NPS model based on Test RMSE
+best_rmse_model_nps <- evaluation_results_nps[which.min(evaluation_results_nps$Test_RMSE), "Model"]
+best_rmse_value_nps <- min(evaluation_results_nps$Test_RMSE)
+
+# Print the best NPS models
+cat("Best Model for NPS Score based on Test MAE:", best_mae_model_nps, "with MAE =", best_mae_value_nps, "\n")
+cat("Best Model for NPS Score based on Test RMSE:", best_rmse_model_nps, "with RMSE =", best_rmse_value_nps, "\n")
+
+# Melt the data for visualization
+evaluation_results_nps_melted <- melt(evaluation_results_nps, id.vars = "Model", variable.name = "Metric", value.name = "Value")
+
+# Plot
+ggplot(evaluation_results_nps_melted, aes(x = Model, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Metric, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Comparison of Model Performance for Predicting NPS",
+    y = "Error Value",
+    x = "Model"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "white", color = "white"),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  ) +
+  scale_fill_manual(values = c("Train_MAE" = "tomato", "Test_MAE" = "forestgreen", "Train_RMSE" = "skyblue", "Test_RMSE" = "purple")) +
+  coord_flip() # Flip the coordinates to make the bars horizontal
+
+# Save the plot
+ggsave("NPS Model Comparison.png", width = 12, height = 8, dpi = 300)
+```
+
+
+# Model Comparison for Efficiency Prediction
+```{r message=FALSE, warning=FALSE}
+evaluation_results_efficiency <- data.frame(
+  Model = c("Linear Regression", "Random Forest", "ARIMA", "SVM", "GBM"),
+  Train_MAE = c(train_mae_efficiency_tuned, train_mae_efficiency_rf, mae_efficiency_arima, mae_efficiency_svm, mae_efficiency_gbm),
+  Test_MAE = c(test_mae_efficiency_tuned, test_mae_efficiency_rf, mae_efficiency_arima, mae_efficiency_svm, mae_efficiency_gbm),
+  Train_RMSE = c(train_rmse_efficiency_tuned, train_rmse_efficiency_rf, rmse_efficiency_arima, rmse_efficiency_svm, rmse_efficiency_gbm),
+  Test_RMSE = c(test_rmse_efficiency_tuned, test_rmse_efficiency_rf, rmse_efficiency_arima, rmse_efficiency_svm, rmse_efficiency_gbm)
+)
+
+# Print the evaluation results
+print("Evaluation Results for DEA Efficiency Prediction Models:")
+print(evaluation_results_efficiency)
+
+# Determine the best Efficiency model based on Test MAE
+best_mae_model_efficiency <- evaluation_results_efficiency[which.min(evaluation_results_efficiency$Test_MAE), "Model"]
+best_mae_value_efficiency <- min(evaluation_results_efficiency$Test_MAE)
+
+# Determine the best Efficiency model based on Test RMSE
+best_rmse_model_efficiency <- evaluation_results_efficiency[which.min(evaluation_results_efficiency$Test_RMSE), "Model"]
+best_rmse_value_efficiency <- min(evaluation_results_efficiency$Test_RMSE)
+
+# Print the best Efficiency models
+cat("Best Model for DEA Efficiency based on Test MAE:", best_mae_model_efficiency, "with MAE =", best_mae_value_efficiency, "\n")
+cat("Best Model for DEA Efficiency based on Test RMSE:", best_rmse_model_efficiency, "with RMSE =", best_rmse_value_efficiency, "\n")
+
+# Melt the data for visualization
+evaluation_results_efficiency_melted <- melt(evaluation_results_efficiency, id.vars = "Model", variable.name = "Metric", value.name = "Value")
+
+# Plot
+ggplot(evaluation_results_efficiency_melted, aes(x = Model, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Metric, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Comparison of Model Performance for Predicting DEA Efficiency Scores",
+    y = "Error Value",
+    x = "Model"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "white", color = "white"),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  ) +
+  scale_fill_manual(values = c("Train_MAE" = "tomato", "Test_MAE" = "forestgreen", "Train_RMSE" = "skyblue", "Test_RMSE" = "purple")) +
+  coord_flip() # Flip the coordinates to make the bars horizontal
+
+# Save the plot
+ggsave("Efficiency Model Comparison.png", width = 12, height = 8, dpi = 300)
+```
+
+
+# Perform DEA (Data Envelopment Analysis) using the GBM predictions
+
+## Prepare Data for DEA
+```{r message=FALSE, warning=FALSE}
+# Normalize function
+normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+# Prepare Data for DEA
+test_data_sales$Predicted_Sales_Volume <- predictions_sales_gbm
+test_data_nps$Predicted_NPS <- predictions_nps_gbm
+test_data_efficiency$Predicted_Efficiency <- predictions_efficiency_gbm
+
+# Combine relevant columns into a single data frame for DEA analysis
+dea_data <- test_data_sales %>%
+  dplyr::select(
+    Dealership_Name,
+    Country,
+    Region,
+    Year,
+    Number_of_Salespeople,
+    Number_of_Outlets,
+    Service_Completion_Time,
+    Regional_Population_Density,
+    Local_Economic_Growth,
+    Cultural_Difference_Score,
+    Regulatory_Environment_Score,
+    Predicted_Sales_Volume
+  ) %>%
+  dplyr::mutate(
+    Predicted_NPS = test_data_nps$Predicted_NPS,
+    Predicted_Efficiency = test_data_efficiency$Predicted_Efficiency
+  )
+
+# Convert necessary columns to numeric
+dea_data <- dea_data %>%
+  mutate(
+    Number_of_Salespeople = as.numeric(Number_of_Salespeople),
+    Number_of_Outlets = as.numeric(Number_of_Outlets),
+    Service_Completion_Time = as.numeric(Service_Completion_Time),
+    Predicted_Sales_Volume = as.numeric(Predicted_Sales_Volume),
+    Predicted_NPS = as.numeric(Predicted_NPS),
+    Predicted_Efficiency = as.numeric(Predicted_Efficiency)
+  )
+
+# Normalize data
+dea_data <- dea_data %>%
+  mutate(
+    Number_of_Salespeople = normalize(Number_of_Salespeople),
+    Number_of_Outlets = normalize(Number_of_Outlets),
+    Service_Completion_Time = normalize(Service_Completion_Time),
+    Regional_Population_Density = normalize(Regional_Population_Density),
+    Local_Economic_Growth = normalize(Local_Economic_Growth),
+    Predicted_Sales_Volume = normalize(Predicted_Sales_Volume),
+    Predicted_NPS = normalize(Predicted_NPS),
+    Predicted_Efficiency = normalize(Predicted_Efficiency)
+  )
+
+# Check for any NA values and replace them if necessary
+if (any(is.na(dea_data))) {
+  cat("NA values found in the dataset. Replacing with 0.\n")
+  dea_data[is.na(dea_data)] <- 0
+}
+```
+
+
+## Generate New DEA Efiiciency Scores
+```{r message=FALSE, warning=FALSE}
+# Define inputs and outputs for DEA
+inputs <- dea_data %>%
+  dplyr::select(Number_of_Salespeople, Number_of_Outlets, Service_Completion_Time) %>%
+  as.matrix()
+
+outputs <- dea_data %>%
+  dplyr::select(Predicted_Sales_Volume, Predicted_NPS, Predicted_Efficiency) %>%
+  as.matrix()
+
+# Conduct DEA Analysis
+dea_model <- dea(X = inputs, Y = outputs, RTS = "vrs", ORIENTATION = "in")
+efficiency_scores <- dea_model$eff
+
+# Add efficiency scores to the DEA data
+dea_data$DEA_Efficiency_New <- efficiency_scores
+
+# Summary statistics of efficiency scores
+summary(dea_data$DEA_Efficiency_New)
+
+# Plot the histogram of DEA Efficiency Scores
+hist_plot <- hist(dea_data$DEA_Efficiency_New,
+                  main = "Distribution of DEA Efficiency Scores (Post-Modelling)",
+                  xlab = "Efficiency Score",
+                  breaks = 20,
+                  col = "lightblue",
+                  border = "black",
+                  xlim = c(0, max(efficiency_scores, na.rm = TRUE) + 0.1))
+
+# Save the plot to your drive using ggsave
+# Convert the base R histogram to a ggplot object
+hist_ggplot <- ggplot(dea_data, aes(x = DEA_Efficiency_New)) +
+  geom_histogram(breaks = hist_plot$breaks, 
+                 fill = "lightblue", 
+                 color = "black") +
+  labs(title = "Distribution of DEA Efficiency Scores (Post-Modelling)", 
+       x = "Efficiency Score", 
+       y = "Frequency") +
+  xlim(0, max(efficiency_scores, na.rm = TRUE) + 0.1)
+
+# Save the ggplot histogram
+ggsave("DEA Efficiency Distribution Post-Modelling.png", plot = hist_ggplot, width = 8, height = 6)
+```
+
+
+## Evaluate Predicted Dealership Performance with DEA Scores
+```{r message=FALSE, warning=FALSE}
+# Calculate the average DEA efficiency score per dealer per year
+annual_efficiency <- dea_data %>%
+  group_by(Dealership_Name, Country, Region) %>%
+  summarise(
+    Average_DEA_Efficiency = mean(DEA_Efficiency_New, na.rm = TRUE),
+    Regional_Population_Density = first(Regional_Population_Density),
+    Local_Economic_Growth = first(Local_Economic_Growth),
+    Cultural_Difference_Score = first(Cultural_Difference_Score),
+    Regulatory_Environment_Score = first(Regulatory_Environment_Score)
+  ) %>%
+  ungroup()
+
+# Define performance categories based on Average DEA Efficiency
+performance_levels <- annual_efficiency %>%
+  mutate(
+    Performance_Category = case_when(
+      Average_DEA_Efficiency >= 0.7 ~ "High",
+      Average_DEA_Efficiency >= 0.5 & Average_DEA_Efficiency < 0.7 ~ "Medium",
+      TRUE ~ "Low"
+    )
+  )
+
+# Print performance categories for dealerships
+cat("Performance Categories for Each Dealership:\n")
+print(performance_levels[, c("Dealership_Name", "Country", "Region", "Average_DEA_Efficiency", "Performance_Category")])
+
+# Filter dealerships by performance category
+high_performers <- performance_levels %>% filter(Performance_Category == "High")
+medium_performers <- performance_levels %>% filter(Performance_Category == "Medium")
+low_performers <- performance_levels %>% filter(Performance_Category == "Low")
+
+# Print high, medium, and low performers
+cat("\nHigh Performing Dealerships:\n")
+print(high_performers[, c("Dealership_Name", "Country", "Region", "Average_DEA_Efficiency")])
+
+cat("\nMedium Performing Dealerships:\n")
+print(medium_performers[, c("Dealership_Name", "Country", "Region", "Average_DEA_Efficiency")])
+
+cat("\nLow Performing Dealerships:\n")
+print(low_performers[, c("Dealership_Name", "Country", "Region", "Average_DEA_Efficiency")])
+```
+
+
+## Visualisation of Predicted Dealership Performance with DEA Efficiency Scores
+```{r message=FALSE, warning=FALSE}
+# Reorder the levels of the Performance_Category factor
+performance_levels$Performance_Category <- factor(performance_levels$Performance_Category, 
+                                                  levels = c("Low", "Medium", "High"))
+
+# Simplify the visualization to a dot plot with horizontal lines for performance categories
+dot_plot <- ggplot(performance_levels, aes(x = Average_DEA_Efficiency, y = reorder(Dealership_Name, Average_DEA_Efficiency))) +
+  geom_point(aes(color = Performance_Category), size = 3) +
+  geom_hline(yintercept = seq(1, nrow(performance_levels), by = 1), color = "grey90") +
+  scale_color_manual(values = c("High" = "green", "Medium" = "blue", "Low" = "red")) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 7, color = "black"),  # Smaller text for readability
+    axis.title.y = element_blank(),
+    axis.title.x = element_text(size = 10, color = "black"),
+    panel.background = element_rect(fill = "white", color = NA),  # White background
+    plot.background = element_rect(fill = "white", color = NA),   # White plot background
+    legend.background = element_rect(fill = "white", color = NA), # White legend background
+    plot.title = element_text(color = "black"),                   # Black title
+    axis.text.x = element_text(color = "black"),                  # Black x-axis labels
+    legend.text = element_text(color = "black"),                  # Black legend text
+    legend.title = element_text(color = "black")                  # Black legend title
+  ) +
+  labs(
+    title = "DEA Efficiency Scores by Dealership (Post-Modelling)",
+    y = "Average DEA Efficiency"
+  ) +
+  scale_y_discrete(expand = c(0, 0)) # Remove extra space on y-axis for discrete values
+
+# Save the dot plot with a white background
+ggsave("Efficiency Dot Plot Post-Modelling.png", dot_plot, width = 16, height = 24, dpi = 300)
+
+# Grouped Bar Chart for Dealerships by Performance Category
+bar_chart <- ggplot(performance_levels, aes(x = Performance_Category, fill = Performance_Category)) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = c("Low" = "red", "Medium" = "blue", "High" = "green")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 14, color = "black"),
+    axis.title.y = element_text(size = 14, color = "black"),
+    panel.background = element_rect(fill = "white", color = NA),  # White background
+    plot.background = element_rect(fill = "white", color = NA),   # White plot background
+    legend.background = element_rect(fill = "white", color = NA), # White legend background
+    legend.position = "none",                                     # Hide legend for simplicity
+    plot.title = element_text(color = "black", hjust = 0.5)       # Centered title
+  ) +
+  labs(
+    title = "Distribution of Dealerships by Performance Category (Post-Modelling)",
+    x = "Performance Category",
+    y = "Number of Dealerships"
+  ) +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, color = "black", size = 5) # Add count labels
+
+# Save the grouped bar chart with a white background
+ggsave("Efficiency Grouped Bar Chart Post-Modelling.png", bar_chart, width = 12, height = 8, dpi = 300)
+
+# Customize the box plot for DEA Efficiency scores
+box_plot <- ggplot(performance_levels, aes(x = Performance_Category, y = Average_DEA_Efficiency, fill = Performance_Category)) +
+  geom_boxplot(outlier.shape = NA) + # Avoid plotting outliers for a cleaner plot
+  scale_fill_manual(values = c("High" = "green", "Medium" = "blue", "Low" = "red")) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white"),
+    legend.position = "right"
+  ) +
+  labs(
+    title = "Boxplot of DEA Efficiency Scores by Performance Category (Post-Modelling)",
+    x = "Performance Category",
+    y = "Average DEA Efficiency"
+  )
+
+# Save the box plot as a PNG image
+ggsave("Efficiency Box Plot Post-Modelling.png", box_plot, width = 12, height = 8, dpi = 300)
+
+# Combine all performers into a single list for saving
+tables_to_save <- list(
+  "High Performing Dealerships" = high_performers,
+  "Medium Performing Dealerships" = medium_performers,
+  "Low Performing Dealerships" = low_performers
+)
+
+# Save the tables as Excel sheets in a single file
+write_xlsx(tables_to_save, "Dealership Performance Tables.xlsx")
+```
+
+
+# Analysis on Key Variables that Impacts DEA Efficieny
+
+## Variable Importance using Linear Regression
+```{r message=FALSE, warning=FALSE}
+# Linear Regression to Identify Variable Impact on DEA Scores
+variable_impact_lm <- lm(
+  DEA_Efficiency_New ~ Number_of_Salespeople + Number_of_Outlets + Service_Completion_Time,
+  data = dea_data
+)
+
+# Summary of the regression model to see the impact of each variable
+summary(variable_impact_lm)
+
+# Extract and display the coefficients to interpret the impact
+variable_impact_lm_coefficients <- summary(variable_impact_lm)$coefficients
+print(variable_impact_lm_coefficients)
+```
+
+## Variable Importance using Random Forest
+```{r message=FALSE, warning=FALSE}
+# Random Forest to Identify Variable Impact on DEA Scores
+set.seed(123)  # Ensure reproducibility
+
+# Train Random Forest model for variable importance
+variable_impact_rf <- randomForest(
+  DEA_Efficiency_New ~ Number_of_Salespeople + Number_of_Outlets + Service_Completion_Time,
+  data = dea_data,
+  importance = TRUE,
+  ntree = 500
+)
+
+# Print model summary
+print(variable_impact_rf)
+
+# Extract and plot variable importance
+variable_importance_rf <- importance(variable_impact_rf)
+varImpPlot(variable_impact_rf)
+
+# Save variable importance plot
+png("Random Forest Variable Importance Dealership Performance.png", width = 1000, height = 800, res = 150)
+varImpPlot(variable_impact_rf)
+dev.off()
+```
+
+
+## Combining The Results of Variable Importance and Interpretation
+```{r message=FALSE, warning=FALSE}
+# Extract coefficients from the linear model and ensure correct variable names
+lm_coefficients <- as.data.frame(variable_impact_lm_coefficients[, c("Estimate", "Pr(>|t|)")])
+lm_coefficients$Variable <- rownames(lm_coefficients)
+
+# Ensure Random Forest variable importance is also a data frame with matching variable names
+rf_importance <- as.data.frame(variable_importance_rf[, "IncNodePurity"])
+rf_importance$Variable <- rownames(rf_importance)
+colnames(rf_importance) <- c("Variable_Importance", "Variable")
+
+# Merge the two data frames by Variable
+variable_importance_combined <- merge(lm_coefficients, rf_importance, by = "Variable", all = TRUE)
+
+# Sort by importance for interpretation
+variable_importance_combined <- variable_importance_combined[order(-variable_importance_combined$Variable_Importance), ]
+print(variable_importance_combined)
+
+# Save the combined importance as an Excel file for reporting
+write_xlsx(variable_importance_combined, "Variable Importance Dealership Performance.xlsx")
+
+# Filter out the intercept from the data
+variable_importance_long <- variable_importance_combined %>%
+  filter(Variable != "(Intercept)") %>%
+  pivot_longer(cols = c("Estimate", "Variable_Importance"), names_to = "Model", values_to = "Importance")
+
+# Create the bar plot with adjusted bar width and a white background
+ggplot(variable_importance_long, aes(x = reorder(Variable, Importance), y = Importance, fill = Model)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.5) +
+  coord_flip() +
+  scale_fill_manual(values = c("Estimate" = "blue", "Variable_Importance" = "green")) +
+  labs(
+    title = "Variable Importance for Dealership Performance",
+    x = "Variables",
+    y = "Importance Scores",
+    fill = "Model"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 10, color = "black"),
+    axis.text.y = element_text(size = 10, color = "black"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+# Save the plot as a PNG image
+ggsave("Variable Importance Visualization.png", width = 12, height = 8, dpi = 300)
+```
+
+
+# Sensitivity Analysis On Key Variables Impacting Model Predictions
+```{r message=FALSE, warning=FALSE}
+# # Clear unused variables to free up memory
+# rm(list = setdiff(ls(), c("dea_data", "gbm_model_sales", "gbm_model_nps", "gbm_model_efficiency")))
+# gc()
+
+# Store the original (non-normalized) data for sensitivity analysis
+dea_data_sensitivity <- dea_data %>%
+  mutate(
+    Number_of_Salespeople = as.numeric(Number_of_Salespeople),
+    Number_of_Outlets = as.numeric(Number_of_Outlets),
+    Service_Completion_Time = as.numeric(Service_Completion_Time),
+    Predicted_Sales_Volume = as.numeric(Predicted_Sales_Volume),
+    Predicted_NPS = as.numeric(Predicted_NPS),
+    Predicted_Efficiency = as.numeric(Predicted_Efficiency)
+  )
+
+# Define the Sensitivity Analysis Function
+sensitivity_analysis <- function(dea_data_sensitivity, gbm_model_sales, gbm_model_nps, gbm_model_efficiency, input_variable_name, change_percentage) {
+  
+  # Create a copy of the original data for modification
+  modified_data <- dea_data_sensitivity
+  
+  # Adjust the selected input variable by the specified percentage
+  modified_data[[input_variable_name]] <- modified_data[[input_variable_name]] * (1 + change_percentage / 100)
+  
+  # Recalculate predictions based on the modified data
+  modified_data <- modified_data %>%
+    mutate(
+      Predicted_Sales_Volume = predict(gbm_model_sales, newdata = modified_data),
+      Predicted_NPS = predict(gbm_model_nps, newdata = modified_data),
+      Predicted_Efficiency = predict(gbm_model_efficiency, newdata = modified_data)
+    )
+  
+  # Calculate the average predicted values for comparison
+  original_avg_sales <- mean(dea_data_sensitivity$Predicted_Sales_Volume, na.rm = TRUE)
+  modified_avg_sales <- mean(modified_data$Predicted_Sales_Volume, na.rm = TRUE)
+  
+  original_avg_nps <- mean(dea_data_sensitivity$Predicted_NPS, na.rm = TRUE)
+  modified_avg_nps <- mean(modified_data$Predicted_NPS, na.rm = TRUE)
+  
+  original_avg_efficiency <- mean(dea_data_sensitivity$Predicted_Efficiency, na.rm = TRUE)
+  modified_avg_efficiency <- mean(modified_data$Predicted_Efficiency, na.rm = TRUE)
+  
+  # Calculate the differences
+  sales_difference <- modified_avg_sales - original_avg_sales
+  nps_difference <- modified_avg_nps - original_avg_nps
+  efficiency_difference <- modified_avg_efficiency - original_avg_efficiency
+  
+  return(list(
+    modified_data = modified_data,
+    sales_difference = sales_difference,
+    nps_difference = nps_difference,
+    efficiency_difference = efficiency_difference
+  ))
+}
+
+# # Conduct sensitivity analysis on each input variable
+# gc() # Free memory before running
+sensitivity_salespeople <- sensitivity_analysis(dea_data_sensitivity, gbm_model_sales, gbm_model_nps, gbm_model_efficiency, "Number_of_Salespeople", 10) # Increase by 10%
+sensitivity_outlets <- sensitivity_analysis(dea_data_sensitivity, gbm_model_sales, gbm_model_nps, gbm_model_efficiency, "Number_of_Outlets", 10)        # Increase by 10%
+sensitivity_service_time <- sensitivity_analysis(dea_data_sensitivity, gbm_model_sales, gbm_model_nps, gbm_model_efficiency, "Service_Completion_Time", -10) # Decrease by 10%
+
+# Print out the results
+cat("Sales Volume Difference after increasing Number of Salespeople by 10%:", sensitivity_salespeople$sales_difference, "\n")
+cat("NPS Difference after increasing Number of Salespeople by 10%:", sensitivity_salespeople$nps_difference, "\n")
+cat("Efficiency Difference after increasing Number of Salespeople by 10%:", sensitivity_salespeople$efficiency_difference, "\n")
+
+cat("\nSales Volume Difference after increasing Number of Outlets by 10%:", sensitivity_outlets$sales_difference, "\n")
+cat("NPS Difference after increasing Number of Outlets by 10%:", sensitivity_outlets$nps_difference, "\n")
+cat("Efficiency Difference after increasing Number of Outlets by 10%:", sensitivity_outlets$efficiency_difference, "\n")
+
+cat("\nSales Volume Difference after decreasing Service Completion Time by 10%:", sensitivity_service_time$sales_difference, "\n")
+cat("NPS Difference after decreasing Service Completion Time by 10%:", sensitivity_service_time$nps_difference, "\n")
+cat("Efficiency Difference after decreasing Service Completion Time by 10%:", sensitivity_service_time$efficiency_difference, "\n")
+
+# Prepare data for plotting
+sensitivity_results <- data.frame(
+  Input_Variable = c("Number of Salespeople", "Number of Salespeople", "Number of Salespeople", 
+                     "Number of Outlets", "Number of Outlets", "Number of Outlets", 
+                     "Service Completion Time", "Service Completion Time", "Service Completion Time"),
+  Metric = c("Sales Volume", "NPS", "Efficiency", 
+             "Sales Volume", "NPS", "Efficiency", 
+             "Sales Volume", "NPS", "Efficiency"),
+  Difference = c(sensitivity_salespeople$sales_difference, sensitivity_salespeople$nps_difference, sensitivity_salespeople$efficiency_difference,
+                 sensitivity_outlets$sales_difference, sensitivity_outlets$nps_difference, sensitivity_outlets$efficiency_difference,
+                 sensitivity_service_time$sales_difference, sensitivity_service_time$nps_difference, sensitivity_service_time$efficiency_difference)
+)
+
+# Plot the results
+plot_sensitivity <- ggplot(sensitivity_results, aes(x = Input_Variable, y = Difference, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Sensitivity Analysis: Impact of Changing Input Variables on Key Metrics",
+       x = "Input Variable",
+       y = "Difference in Predicted Values") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.background = element_rect(fill = "white", color = NA),     # Set plot background to white
+        panel.background = element_rect(fill = "white", color = NA),    # Set panel background to white
+        panel.grid.major = element_line(color = "grey80"),              # Grid lines in light grey
+        axis.text = element_text(color = "black"),                      # Axis labels in black
+        axis.title = element_text(color = "black"),                     # Axis title in black
+        plot.title = element_text(color = "black", face = "bold"),      # Plot title in black and bold
+        legend.background = element_rect(fill = "white", color = NA))   # Legend background in white
+
+# Display the plot
+print(plot_sensitivity)
+
+# Save the plot as a PNG file
+ggsave(filename = "Sensitivity Analysis Plot.png", plot = plot_sensitivity, width = 10, height = 6, dpi = 300)
+```
+
+
+# Analysis of the Impact of Localisation Fators to DEA Efficieny (Dealership Performance)
+
+## Analyse The Impact of Localisation Factors with Generalized Additive Model (GAM)
+```{r message=FALSE, warning=FALSE}
+# Fit a Generalized Additive Model (GAM) to analyse the impact of localisation factors on DEA efficiency
+localization_model_gam <- gam(
+  Average_DEA_Efficiency ~ s(Regional_Population_Density) +
+    s(Local_Economic_Growth) +
+    s(Cultural_Difference_Score) +
+    s(Regulatory_Environment_Score),
+  data = annual_efficiency,
+  method = "REML"
+)
+
+# Summary of the GAM model (Localisation Analysis)
+cat("\nSummary of the GAM Model (Localisation Analysis):\n")
+print(summary(localization_model_gam))
+
+# Make predictions using the GAM model (Localisation Analysis)
+predictions_localization_gam <- predict(localization_model_gam, newdata = annual_efficiency)
+
+# Calculate MAE and RMSE for the GAM model (Localisation Analysis)
+mae_localization_gam <- mean(abs(predictions_localization_gam - annual_efficiency$Average_DEA_Efficiency))
+rmse_localization_gam <- sqrt(mean((predictions_localization_gam - annual_efficiency$Average_DEA_Efficiency)^2))
+
+# Print MAE and RMSE for the GAM model (Localisation Analysis)
+cat("\nMean Absolute Error (MAE) (Localisation Analysis):\n", mae_localization_gam, "\n")
+cat("Root Mean Squared Error (RMSE) (Localisation Analysis):\n", rmse_localization_gam, "\n")
+
+# Extract smooth term estimates using predict.gam function
+smooth_terms <- predict(localization_model_gam, type = "terms", se.fit = TRUE)
+
+# Convert to a data frame for easier manipulation
+smooth_data <- data.frame(
+  Localization_Factors = rep(colnames(smooth_terms$fit), each = nrow(smooth_terms$fit)),
+  Smooth_Estimate = as.vector(smooth_terms$fit)
+)
+
+# Ensure the data is properly populated
+if (nrow(smooth_data) > 0) {
+  # Visualize smooth term estimates for localization factors
+  coeff_plot_gam <- ggplot(smooth_data, aes(x = reorder(Localization_Factors, Smooth_Estimate), y = Smooth_Estimate)) +
+    geom_bar(stat = "identity", fill = "skyblue") +
+    coord_flip() +
+    labs(
+      title = "Impact of Localisation Factors on DEA Efficiency (GAM)",
+      x = "Localisation Factors",
+      y = "Smooth Term Estimate"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.background = element_rect(fill = "white"),
+      panel.background = element_rect(fill = "white"),
+      legend.background = element_rect(fill = "white"),
+      legend.key = element_rect(fill = "white"),
+      axis.title.x = element_text(color = "black"),
+      axis.title.y = element_text(color = "black"),
+      axis.text.x = element_text(color = "black"),
+      axis.text.y = element_text(color = "black"),
+      plot.title = element_text(color = "black"),
+      legend.title = element_text(color = "black"),
+      legend.text = element_text(color = "black")
+    )
+
+  # Print the coefficients plot
+  print(coeff_plot_gam)
+
+  # Save the smooth term plot
+  ggsave("Localisation Factors Impact Coefficients GAM.png", plot = coeff_plot_gam, width = 8, height = 4)
+} else {
+  cat("No data available for plotting.\n")
+}
+```
+
+
+## Analyse The Impact of Localisation Factors with Random Forest
+```{r message=FALSE, warning=FALSE}
+set.seed(123)  # For reproducibility
+
+# Split data into training and testing sets
+trainIndex_localization_rf <- createDataPartition(annual_efficiency$Average_DEA_Efficiency, p = 0.8,
+                                                  list = FALSE,
+                                                  times = 1)
+annual_efficiency_train_localization_rf <- annual_efficiency[trainIndex_localization_rf, ]
+annual_efficiency_test_localization_rf <- annual_efficiency[-trainIndex_localization_rf, ]
+
+# Train Random Forest model for localisation impact analysis
+localization_model_rf <- randomForest(Average_DEA_Efficiency ~ Regional_Population_Density + Local_Economic_Growth +
+                                      Cultural_Difference_Score + Regulatory_Environment_Score,
+                                      data = annual_efficiency_train_localization_rf,
+                                      importance = TRUE,
+                                      ntree = 1000)
+
+# Print model summary for localisation impact analysis
+print(localization_model_rf)
+
+# Plot variable importance for localisation impact analysis
+importance_localization_rf <- importance(localization_model_rf)
+varImpPlot(localization_model_rf)
+
+# Predictions on test set for localisation impact analysis
+predictions_localization_rf <- predict(localization_model_rf, annual_efficiency_test_localization_rf)
+
+# Evaluate model performance using MAE and RMSE for localization impact analysis
+rmse_localization_rf <- RMSE(predictions_localization_rf, annual_efficiency_test_localization_rf$Average_DEA_Efficiency)
+mae_localization_rf <- MAE(predictions_localization_rf, annual_efficiency_test_localization_rf$Average_DEA_Efficiency)
+r2_localization_rf <- R2(predictions_localization_rf, annual_efficiency_test_localization_rf$Average_DEA_Efficiency)
+
+cat("Random Forest Model Performance (Localisation Analysis):\n")
+cat("RMSE:", rmse_localization_rf, "\n")
+cat("MAE:", mae_localization_rf, "\n")
+cat("R-squared:", r2_localization_rf, "\n")
+
+# Save variable importance plot for localisation impact analysis
+png("Localisation Factors Impact Random Forest.png", width = 1000, height = 800, res = 150)
+varImpPlot(localization_model_rf)
+dev.off()
+
+# Save model summary to a text file for localisation impact analysis
+sink("Model Summary Localisation Random Forest.txt")
+print(localization_model_rf)
+cat("\nRandom Forest Model Performance (Localisation Analysis):\n")
+cat("RMSE:", rmse_localization_rf, "\n")
+cat("MAE:", mae_localization_rf, "\n")
+cat("R-squared:", r2_localization_rf, "\n")
+sink()
+```
+
+
+## Analyse The Impact of Localisation Factors with GBM
+```{r message=FALSE, warning=FALSE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Split data into training and testing sets
+trainIndex_localization_gbm <- createDataPartition(annual_efficiency$Average_DEA_Efficiency, p = 0.8,
+                                  list = FALSE,
+                                  times = 1)
+annual_efficiency_train_localization_gbm <- annual_efficiency[trainIndex_localization_gbm, ]
+annual_efficiency_test_localization_gbm <- annual_efficiency[-trainIndex_localization_gbm, ]
+
+# Train GBM model for localisation impact analysis
+localization_model_gbm <- gbm(Average_DEA_Efficiency ~ Regional_Population_Density + Local_Economic_Growth +
+                   Cultural_Difference_Score + Regulatory_Environment_Score,
+                 data = annual_efficiency_train_localization_gbm,
+                 distribution = "gaussian",
+                 n.trees = 5000,
+                 interaction.depth = 12,
+                 shrinkage = 0.01,
+                 cv.folds = 10,
+                 n.minobsinnode = 5,
+                 verbose = FALSE)
+
+# Find the optimal number of trees for localisation impact analysis
+best_iter_localization_gbm <- gbm.perf(localization_model_gbm, method = "cv")
+
+# Predictions on test set for localisation impact analysis
+predictions_localization_gbm <- predict(localization_model_gbm, annual_efficiency_test_localization_gbm, n.trees = best_iter_localization_gbm)
+
+# Evaluate model performance using MAE and RMSE for localisation impact analysis
+rmse_localization_gbm <- RMSE(predictions_localization_gbm, annual_efficiency_test_localization_gbm$Average_DEA_Efficiency)
+mae_localization_gbm <- MAE(predictions_localization_gbm, annual_efficiency_test_localization_gbm$Average_DEA_Efficiency)
+r2_localization_gbm <- R2(predictions_localization_gbm, annual_efficiency_test_localization_gbm$Average_DEA_Efficiency)
+
+cat("GBM Model Performance (Localisation Analysis):\n")
+cat("RMSE:", rmse_localization_gbm, "\n")
+cat("MAE:", mae_localization_gbm, "\n")
+cat("R-squared:", r2_localization_gbm, "\n")
+
+# Generate variable importance
+importance_localization_gbm <- summary(localization_model_gbm, n.trees = best_iter_localization_gbm, plotit = FALSE)
+
+# Convert the importance data to a vector or matrix if necessary
+importance_localization_gbm_vector <- as.vector(importance_localization_gbm$rel.inf)
+
+# Set names for the barplot
+names(importance_localization_gbm_vector) <- rownames(importance_localization_gbm)
+
+# Display the variable importance plot in R console
+par(mar = c(11, 5, 3, 1))  # Adjust bottom margin (first value) to give more space for labels
+barplot(importance_localization_gbm_vector,
+        las = 2,  # Rotate labels
+        col = "blue",
+        main = "Localization Factors Impact to Dealership Performance",
+        ylab = "Relative Influence",
+        cex.names = 0.8)  # Adjust label size if necessary
+
+# Save the variable importance plot with adjusted margins and rotated labels
+png("Localisation Factors Impact GBM.png", width = 1000, height = 800, res = 150)
+par(mar = c(11, 5, 3, 1))  # Adjust bottom margin (first value) to give more space for labels
+barplot(importance_localization_gbm_vector,
+        las = 2,  # Rotate labels
+        col = "blue",
+        main = "Localisation Factors Impact in GBM Model",
+        ylab = "Relative Influence",
+        cex.names = 0.8)  # Adjust label size if necessary
+dev.off()
+
+# Save model summary to a text file for localization impact analysis
+sink("Model Summary Localisation GBM.txt")
+summary(localization_model_gbm)
+cat("\nGBM Model Performance (Localisation Analysis):\n")
+cat("Optimal number of trees:", best_iter_localization_gbm, "\n")
+cat("RMSE:", rmse_localization_gbm, "\n")
+cat("MAE:", mae_localization_gbm, "\n")
+cat("R-squared:", r2_localization_gbm, "\n")
+sink()
+```
+
+
+## Determine The Best Method to Analyse Localisation Factors
+```{r message=FALSE, warning=FALSE}
+# GAM
+rmse_localization_gam <- sqrt(mean((predictions_localization_gam - annual_efficiency$Average_DEA_Efficiency)^2))
+mae_localization_gam <- mean(abs(predictions_localization_gam - annual_efficiency$Average_DEA_Efficiency))
+r2_localization_gam <- summary(localization_model_gam)$r.sq
+
+# Random Forest
+rmse_localization_rf <- RMSE(predictions_localization_rf, annual_efficiency_test_localization_rf$Average_DEA_Efficiency)
+mae_localization_rf <- MAE(predictions_localization_rf, annual_efficiency_test_localization_rf$Average_DEA_Efficiency)
+r2_localization_rf <- R2(predictions_localization_rf, annual_efficiency_test_localization_rf$Average_DEA_Efficiency)
+
+# GBM
+rmse_localization_gbm <- RMSE(predictions_localization_gbm, annual_efficiency_test_localization_gbm$Average_DEA_Efficiency)
+mae_localization_gbm <- MAE(predictions_localization_gbm, annual_efficiency_test_localization_gbm$Average_DEA_Efficiency)
+r2_localization_gbm <- R2(predictions_localization_gbm, annual_efficiency_test_localization_gbm$Average_DEA_Efficiency)
+
+# Create a data frame to compare the models
+comparison_df_localization <- data.frame(
+  Model = c("GAM", "Random Forest", "GBM"),
+  RMSE = c(rmse_localization_gam, rmse_localization_rf, rmse_localization_gbm),
+  MAE = c(mae_localization_gam, mae_localization_rf, mae_localization_gbm),
+  R_squared = c(r2_localization_gam, r2_localization_rf, r2_localization_gbm)
+)
+
+# Print the comparison table
+print(comparison_df_localization)
+
+# Determine the best model based on RMSE, MAE, and R-squared
+best_rmse_model_localization <- comparison_df_localization[which.min(comparison_df_localization$RMSE), "Model"]
+best_mae_model_localization <- comparison_df_localization[which.min(comparison_df_localization$MAE), "Model"]
+best_r2_model_localization <- comparison_df_localization[which.max(comparison_df_localization$R_squared), "Model"]
+
+cat("\nBest Model Based on RMSE:\n", best_rmse_model_localization, "\n")
+cat("Best Model Based on MAE:\n", best_mae_model_localization, "\n")
+cat("Best Model Based on R-squared:\n", best_r2_model_localization, "\n")
+
+# If we want to summarise which model is the best overall, we could consider the following criteria:
+# Assuming equal importance for RMSE, MAE, and R-squared
+# Count how many times each model appears as the best model in each metric
+model_votes_localization <- c(best_rmse_model_localization, best_mae_model_localization, best_r2_model_localization)
+overall_best_model_localization <- names(sort(table(model_votes_localization), decreasing = TRUE))[1]
+
+cat("\nOverall Best Model:\n", overall_best_model_localization, "\n")
+
+# Create the comparison data frame
+comparison_df_localization <- data.frame(
+  Model = c("GAM", "Random Forest", "GBM"),
+  RMSE = c(rmse_localization_gam, rmse_localization_rf, rmse_localization_gbm),
+  MAE = c(mae_localization_gam, mae_localization_rf, mae_localization_gbm),
+  R_squared = c(r2_localization_gam, r2_localization_rf, r2_localization_gbm)
+)
+
+# Convert the data frame to long format for easier plotting with ggplot
+comparison_df_long <- comparison_df_localization %>%
+  pivot_longer(cols = c("RMSE", "MAE", "R_squared"), names_to = "Metric", values_to = "Value")
+
+# Plot the metrics comparison with a white background
+p <- ggplot(comparison_df_long, aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = c("GAM" = "coral", "Random Forest" = "steelblue", "GBM" = "green4")) +
+  labs(
+    title = "Model Comparison for Localisation Factors",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    legend.title = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5),
+    strip.text = element_text(size = 12, face = "bold"),
+    panel.background = element_rect(fill = "white", color = NA),  # Set the background to white
+    plot.background = element_rect(fill = "white", color = NA)    # Set the plot background to white
+  )
+
+# Print the plot to console
+print(p)
+
+# Save the plot to a file
+ggsave("Model Comparison for Localisation Factors.png", plot = p, width = 15, height = 5)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
